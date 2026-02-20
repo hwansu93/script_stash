@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Script Stash</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='url(%23g)'/%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='32' y2='32'%3E%3Cstop stop-color='%230a0e1a'/%3E%3Cstop offset='1' stop-color='%231a0e2e'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ctext x='6' y='22' font-family='monospace' font-size='16' font-weight='bold' fill='%2300d4ff'%3E%3E_%3C/text%3E%3C/svg%3E">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg-deep: #0a0e1a;
+            --bg-purple: #1a0e2e;
+            --cyan: #00d4ff;
+            --cyan-dim: rgba(0, 212, 255, 0.15);
+            --cyan-glow: rgba(0, 212, 255, 0.4);
+            --white: #e0e6f0;
+            --white-dim: rgba(224, 230, 240, 0.5);
+            --violet: #7c3aed;
+            --violet-dim: rgba(124, 58, 237, 0.25);
+            --terminal-bg: #0d1117;
+            --terminal-border: rgba(224, 230, 240, 0.08);
+            --font-heading: 'Space Grotesk', system-ui, sans-serif;
+            --font-code: 'Fira Code', 'Cascadia Code', monospace;
+            --font-body: 'Space Grotesk', system-ui, sans-serif;
+        }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            font-family: var(--font-body);
+            background: linear-gradient(135deg, var(--bg-deep) 0%, var(--bg-purple) 100%);
+            color: var(--white);
+            min-height: 100vh;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* Starfield */
+        .starfield {
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            pointer-events: none;
+            overflow: hidden;
+        }
+
+        .star {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            background: var(--white);
+            border-radius: 50%;
+            animation: drift linear infinite;
+        }
+
+        .star.bright {
+            width: 2px;
+            height: 2px;
+            box-shadow: 0 0 4px rgba(224, 230, 240, 0.3);
+        }
+
+        @keyframes drift {
+            from { transform: translateY(0) translateX(0); opacity: 0.3; }
+            50% { opacity: 1; }
+            to { transform: translateY(-100vh) translateX(30px); opacity: 0.3; }
+        }
+
+        /* Layout */
+        .page-content {
+            position: relative;
+            z-index: 1;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Top Nav */
+        .top-nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 32px;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            background: rgba(10, 14, 26, 0.7);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--terminal-border);
+        }
+
+        .nav-back {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--white-dim);
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .nav-back:hover { color: var(--cyan); }
+
+        .nav-back svg { width: 16px; height: 16px; }
+
+        .nav-github {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--white-dim);
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .nav-github:hover { color: var(--white); }
+
+        .nav-github svg { width: 20px; height: 20px; }
+
+        /* Hero */
+        .hero {
+            text-align: center;
+            padding: 80px 24px 60px;
+        }
+
+        .hero-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 72px;
+            height: 72px;
+            border-radius: 18px;
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.12), rgba(124, 58, 237, 0.12));
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            margin-bottom: 28px;
+            animation: float 4s ease-in-out infinite;
+        }
+
+        .hero-icon svg {
+            width: 36px;
+            height: 36px;
+            color: var(--cyan);
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-8px); }
+        }
+
+        .hero h1 {
+            font-family: var(--font-heading);
+            font-size: clamp(40px, 7vw, 64px);
+            font-weight: 700;
+            letter-spacing: -2px;
+            line-height: 1.1;
+            margin-bottom: 16px;
+            background: linear-gradient(135deg, var(--white) 0%, var(--cyan) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero .tagline {
+            font-size: 18px;
+            color: var(--white-dim);
+            font-weight: 400;
+            max-width: 480px;
+            margin: 0 auto;
+            line-height: 1.6;
+        }
+
+        /* Scripts Grid */
+        .scripts-section {
+            padding: 0 24px 80px;
+            max-width: 960px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        .scripts-section h2 {
+            font-family: var(--font-heading);
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--cyan);
+            margin-bottom: 28px;
+            padding-left: 4px;
+        }
+
+        .scripts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+            gap: 24px;
+        }
+
+        /* Terminal Card */
+        .terminal-card {
+            background: var(--terminal-bg);
+            border-radius: 12px;
+            border: 1px solid var(--terminal-border);
+            overflow: hidden;
+            transition: border-color 0.3s, box-shadow 0.3s, transform 0.3s;
+            opacity: 0;
+            transform: translateY(24px);
+            text-decoration: none;
+            color: inherit;
+            display: block;
+        }
+
+        .terminal-card.visible {
+            opacity: 1;
+            transform: translateY(0);
+            transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+                        transform 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+                        border-color 0.3s, box-shadow 0.3s;
+        }
+
+        .terminal-card:hover {
+            border-color: rgba(0, 212, 255, 0.3);
+            box-shadow: 0 0 24px rgba(0, 212, 255, 0.1), 0 0 48px rgba(0, 212, 255, 0.05);
+            transform: translateY(-2px) scale(1.01);
+        }
+
+        .terminal-titlebar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            background: rgba(224, 230, 240, 0.04);
+            border-bottom: 1px solid var(--terminal-border);
+        }
+
+        .terminal-dots {
+            display: flex;
+            gap: 6px;
+        }
+
+        .terminal-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .terminal-dot.red { background: #ff5f57; }
+        .terminal-dot.yellow { background: #febc2e; }
+        .terminal-dot.green { background: #28c840; }
+
+        .terminal-filename {
+            font-family: var(--font-code);
+            font-size: 12px;
+            color: var(--white-dim);
+            margin-left: 4px;
+        }
+
+        .terminal-body {
+            padding: 16px 18px;
+            font-family: var(--font-code);
+            font-size: 13px;
+            line-height: 1.7;
+            color: rgba(224, 230, 240, 0.7);
+            min-height: 160px;
+            overflow: hidden;
+        }
+
+        .terminal-body .prompt { color: var(--cyan); }
+        .terminal-body .bold { color: var(--white); font-weight: 600; }
+        .terminal-body .yellow { color: #febc2e; }
+        .terminal-body .green { color: #28c840; }
+        .terminal-body .dim { opacity: 0.5; }
+        .terminal-body .cyan { color: var(--cyan); }
+
+        .terminal-body .line {
+            white-space: pre;
+            display: block;
+        }
+
+        .card-footer {
+            padding: 12px 18px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .card-tags {
+            display: flex;
+            gap: 6px;
+        }
+
+        .tag {
+            font-family: var(--font-code);
+            font-size: 11px;
+            font-weight: 500;
+            padding: 3px 10px;
+            border-radius: 6px;
+            background: var(--cyan-dim);
+            color: var(--cyan);
+            border: 1px solid rgba(0, 212, 255, 0.12);
+        }
+
+        .tag.violet {
+            background: var(--violet-dim);
+            color: #a78bfa;
+            border-color: rgba(124, 58, 237, 0.15);
+        }
+
+        .card-link {
+            font-family: var(--font-code);
+            font-size: 12px;
+            color: var(--white-dim);
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            transition: color 0.2s;
+        }
+
+        .terminal-card:hover .card-link { color: var(--cyan); }
+
+        .card-link svg { width: 14px; height: 14px; }
+
+        /* Footer */
+        .page-footer {
+            margin-top: auto;
+            text-align: center;
+            padding: 32px 24px;
+            border-top: 1px solid var(--terminal-border);
+        }
+
+        .page-footer a {
+            color: var(--white-dim);
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .page-footer a:hover { color: var(--cyan); }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .top-nav { padding: 14px 18px; }
+            .hero { padding: 60px 18px 48px; }
+            .hero .tagline { font-size: 16px; }
+            .scripts-section { padding: 0 18px 60px; }
+            .scripts-grid { grid-template-columns: 1fr; }
+            .terminal-body { font-size: 12px; min-height: 140px; }
+        }
+
+        @media (max-width: 480px) {
+            .hero h1 { letter-spacing: -1px; }
+            .hero-icon { width: 60px; height: 60px; }
+            .hero-icon svg { width: 28px; height: 28px; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Starfield -->
+    <div class="starfield" id="starfield"></div>
+
+    <div class="page-content">
+        <!-- Top Nav -->
+        <nav class="top-nav">
+            <a href="https://nexus.roborovski-galaxy.ts.net" class="nav-back">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="15 18 9 12 15 6"/>
+                </svg>
+                Back to Dashboard
+            </a>
+            <a href="https://github.com/hwansu93/script_stash" class="nav-github" target="_blank" rel="noopener">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+                </svg>
+            </a>
+        </nav>
+
+        <!-- Hero -->
+        <section class="hero">
+            <div class="hero-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="4 17 10 11 4 5"/>
+                    <line x1="12" y1="19" x2="20" y2="19"/>
+                </svg>
+            </div>
+            <h1>Script Stash</h1>
+            <p class="tagline">A collection of shell scripts for remote development workflows.</p>
+        </section>
+
+        <!-- Scripts Grid -->
+        <section class="scripts-section">
+            <h2>Scripts</h2>
+            <div class="scripts-grid">
+
+                <!-- tmux-connect.sh -->
+                <a href="https://github.com/hwansu93/script_stash/blob/main/tmux-connect.sh" class="terminal-card" target="_blank" rel="noopener">
+                    <div class="terminal-titlebar">
+                        <div class="terminal-dots">
+                            <span class="terminal-dot red"></span>
+                            <span class="terminal-dot yellow"></span>
+                            <span class="terminal-dot green"></span>
+                        </div>
+                        <span class="terminal-filename">tmux-connect.sh</span>
+                    </div>
+                    <div class="terminal-body">
+                        <span class="line"><span class="cyan bold">  ╔══════════════════════════════════╗</span></span>
+                        <span class="line"><span class="cyan bold">  ║       tmux session manager       ║</span></span>
+                        <span class="line"><span class="cyan bold">  ╚══════════════════════════════════╝</span></span>
+                        <span class="line"></span>
+                        <span class="line">  <span class="bold">Active Sessions:</span></span>
+                        <span class="line"></span>
+                        <span class="line">    <span class="yellow bold">[1]</span>  main  <span class="dim">(3 windows)</span>  <span class="green">● attached</span></span>
+                        <span class="line">    <span class="yellow bold">[2]</span>  dev   <span class="dim">(1 windows)</span></span>
+                        <span class="line"></span>
+                        <span class="line">    <span class="yellow bold">[n]</span>  Create new session</span>
+                        <span class="line">    <span class="yellow bold">[r]</span>  Rename a session</span>
+                        <span class="line">    <span class="yellow bold">[q]</span>  Quit</span>
+                    </div>
+                    <div class="card-footer">
+                        <div class="card-tags">
+                            <span class="tag">bash</span>
+                            <span class="tag violet">tmux</span>
+                        </div>
+                        <span class="card-link">
+                            View on GitHub
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="9 18 15 12 9 6"/>
+                            </svg>
+                        </span>
+                    </div>
+                </a>
+
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="page-footer">
+            <a href="https://github.com/hwansu93/script_stash">github.com/hwansu93/script_stash</a>
+        </footer>
+    </div>
+
+    <script>
+        // Starfield
+        (function() {
+            var field = document.getElementById('starfield');
+            var count = 80;
+            for (var i = 0; i < count; i++) {
+                var star = document.createElement('div');
+                star.className = 'star' + (Math.random() > 0.85 ? ' bright' : '');
+                star.style.left = Math.random() * 100 + '%';
+                star.style.top = Math.random() * 100 + '%';
+                star.style.animationDuration = (40 + Math.random() * 80) + 's';
+                star.style.animationDelay = -(Math.random() * 80) + 's';
+                star.style.opacity = 0.2 + Math.random() * 0.5;
+                field.appendChild(star);
+            }
+        })();
+
+        // Intersection Observer for fade-in
+        (function() {
+            var cards = document.querySelectorAll('.terminal-card');
+            var observer = new IntersectionObserver(function(entries) {
+                entries.forEach(function(entry) {
+                    if (entry.isIntersecting) {
+                        entry.target.classList.add('visible');
+                        observer.unobserve(entry.target);
+                    }
+                });
+            }, { threshold: 0.1 });
+            cards.forEach(function(card) { observer.observe(card); });
+        })();
+    </script>
+</body>
+</html>
