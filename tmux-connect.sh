@@ -217,6 +217,7 @@ show_main_menu() {
     draw_sessions "main"
     draw_projects "display"
 
+    echo -e "    ${BOLD}${YELLOW}[s]${RESET}  Scratchpad"
     echo -e "    ${BOLD}${YELLOW}[p]${RESET}  Select a project"
     echo -e "    ${BOLD}${YELLOW}[n]${RESET}  New project"
     echo -e "    ${BOLD}${YELLOW}[r]${RESET}  Rename a session"
@@ -248,6 +249,18 @@ while true; do
     case "$choice" in
         q)
             echo -e "  ${DIM}Goodbye.${RESET}"
+            exit 0
+            ;;
+
+        s)
+            # Scratchpad — quick session in projects root
+            if tmux has-session -t scratchpad 2>/dev/null; then
+                tmux attach -t scratchpad
+            else
+                tmux new-session -d -s scratchpad -c "$PROJECTS_DIR"
+                tmux send-keys -t scratchpad "claude --dangerously-skip-permissions" Enter
+                tmux attach -t scratchpad
+            fi
             exit 0
             ;;
 
