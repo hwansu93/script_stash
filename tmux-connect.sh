@@ -541,23 +541,26 @@ launch_from_picker() {
     launch_session "$folder" "$root_dir"
 }
 
+next_scratchpad_number() {
+    local sp_max=0 sp_line sp_num
+    while IFS= read -r sp_line; do
+        sp_num="${sp_line#scratchpad-}"
+        if [ "$sp_num" -gt "$sp_max" ] 2>/dev/null; then
+            sp_max="$sp_num"
+        fi
+    done < <(tmux ls -F '#{session_name}' 2>/dev/null | grep -E '^scratchpad-[0-9]+$')
+    echo $(( sp_max + 1 ))
+}
+
 handle_scratchpad() {
-    # If scratchpad session exists and it's the only one, attach to it
-    if tmux has-session -t "=scratchpad" 2>/dev/null; then
-        # Check if there are numbered scratchpads too
-        local has_numbered=0
-        if tmux ls -F '#{session_name}' 2>/dev/null | grep -qE '^scratchpad-[0-9]+$'; then
-            has_numbered=1
-        fi
-        if [ "$has_numbered" -eq 0 ]; then
-            tmux attach -t "=scratchpad"
-            check_exit_after_attach "scratchpad"
-            return
-        fi
+    # Check if ANY scratchpad session exists (base or numbered)
+    local has_any_scratchpad=0
+    if tmux ls -F '#{session_name}' 2>/dev/null | grep -qE '^scratchpad(-|$)'; then
+        has_any_scratchpad=1
     fi
 
-    # If no base scratchpad exists, create it
-    if ! tmux has-session -t "=scratchpad" 2>/dev/null; then
+    # No scratchpads exist — create the base scratchpad and attach
+    if [ "$has_any_scratchpad" -eq 0 ]; then
         tmux new-session -d -s scratchpad -c "$PROJECTS_DIR"
         tmux send-keys -t "scratchpad" "clear && claude --dangerously-skip-permissions" Enter
         tmux attach -t "=scratchpad"
@@ -565,8 +568,8 @@ handle_scratchpad() {
         return
     fi
 
-    # Base scratchpad exists and there are numbered ones too; auto-number a new one
-    local sp_max sp_num sp_name
+    # At least one scratchpad exists — prompt for auto-number or custom name
+    local sp_name
     echo ""
     read_input_with_cancel "  Name for new scratchpad (Enter for auto): "
     if [[ $? -ne 0 ]]; then return 0; fi
@@ -574,14 +577,7 @@ handle_scratchpad() {
     sp_input=$(echo "$REPLY" | xargs)
 
     if [ -z "$sp_input" ]; then
-        sp_max=0
-        while IFS= read -r sp_line; do
-            sp_num="${sp_line#scratchpad-}"
-            if [ "$sp_num" -gt "$sp_max" ] 2>/dev/null; then
-                sp_max="$sp_num"
-            fi
-        done < <(tmux ls -F '#{session_name}' 2>/dev/null | grep -E '^scratchpad-[0-9]+$')
-        sp_name="scratchpad-$(( sp_max + 1 ))"
+        sp_name="scratchpad-$(next_scratchpad_number)"
     else
         sp_name="scratchpad-${sp_input}"
         if tmux has-session -t "=$sp_name" 2>/dev/null; then
@@ -632,6 +628,41 @@ handle_rename() {
 
     old_name="${ALL_DISPLAY_NAMES[$((rnum_int - 1))]}"
 
+    # Scratchpad sessions: prompt for suffix, preserve prefix
+    if [[ "$old_name" == scratchpad || "$old_name" == scratchpad-* ]]; then
+        read_input_with_cancel "  New suffix for '$old_name' (blank = auto-number): "
+        if [[ $? -ne 0 ]]; then return 0; fi
+        local suffix
+        suffix=$(echo "$REPLY" | xargs)
+
+        if [ -z "$suffix" ]; then
+            newname="scratchpad-$(next_scratchpad_number)"
+        else
+            if [[ "$suffix" =~ [.:=] ]]; then
+                STATUS_MSG="Suffix cannot contain '.', ':', or '='."
+                STATUS_COLOR="$RED"
+                return
+            fi
+            newname="scratchpad-${suffix}"
+        fi
+
+        if tmux has-session -t "=$newname" 2>/dev/null; then
+            STATUS_MSG="Session '$newname' already exists. Choose a different name."
+            STATUS_COLOR="$RED"
+            return
+        fi
+
+        if tmux rename-session -t "=$old_name" "$newname"; then
+            STATUS_MSG="Renamed '$old_name' to '$newname'."
+            STATUS_COLOR="$GREEN"
+        else
+            STATUS_MSG="Failed to rename '$old_name'."
+            STATUS_COLOR="$RED"
+        fi
+        return
+    fi
+
+    # Non-scratchpad sessions: original rename behavior
     read_input_with_cancel "  New name for '$old_name': "
     if [[ $? -ne 0 ]]; then return 0; fi
     newname=$(echo "$REPLY" | xargs)
