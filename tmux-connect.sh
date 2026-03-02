@@ -443,6 +443,18 @@ draw_screen() {
     printf "\n  > "
 }
 
+# Exit script with goodbye if the attached session was destroyed
+check_exit_after_attach() {
+    local sname="$1"
+    if ! tmux has-session -t "=$sname" 2>/dev/null; then
+        printf '\033[2J\033[H'
+        printf '\n'
+        printf '  \033[1;36m Thanks for using tmux-connect. See you next time! \033[0m\n'
+        printf '\n'
+        exit 0
+    fi
+}
+
 # ── Session Actions ──────────────────────────────────────────────────────────
 
 prompt_session_name() {
@@ -473,13 +485,15 @@ launch_session() {
         return 1
     fi
 
-    if tmux has-session -t "$sname" 2>/dev/null; then
-        tmux attach -t "$sname"
+    if tmux has-session -t "=$sname" 2>/dev/null; then
+        tmux attach -t "=$sname"
+        check_exit_after_attach "$sname"
     else
         tmux new-session -d -s "$sname" -c "$full_path"
-        tmux set-environment -t "$sname" PROJECT_DIR "$full_path"
-        tmux send-keys -t "$sname" "claude --dangerously-skip-permissions" Enter
-        tmux attach -t "$sname"
+        tmux send-keys -t "$sname" "clear && claude --dangerously-skip-permissions" Enter
+        tmux set-environment -t "=$sname" PROJECT_DIR "$full_path"
+        tmux attach -t "=$sname"
+        check_exit_after_attach "$sname"
     fi
 }
 
@@ -511,7 +525,8 @@ attach_to_session() {
     local num=$1
     local idx=$(( num - 1 ))
     local sname="${ALL_DISPLAY_NAMES[$idx]}"
-    tmux attach -t "$sname"
+    tmux attach -t "=$sname"
+    check_exit_after_attach "$sname"
 }
 
 launch_from_picker() {
@@ -528,25 +543,25 @@ launch_from_picker() {
 
 handle_scratchpad() {
     # If scratchpad session exists and it's the only one, attach to it
-    if tmux has-session -t scratchpad 2>/dev/null; then
+    if tmux has-session -t "=scratchpad" 2>/dev/null; then
         # Check if there are numbered scratchpads too
         local has_numbered=0
         if tmux ls -F '#{session_name}' 2>/dev/null | grep -qE '^scratchpad-[0-9]+$'; then
             has_numbered=1
         fi
         if [ "$has_numbered" -eq 0 ]; then
-            tmux attach -t scratchpad
+            tmux attach -t "=scratchpad"
+            check_exit_after_attach "scratchpad"
             return
         fi
     fi
 
     # If no base scratchpad exists, create it
-    if ! tmux has-session -t scratchpad 2>/dev/null; then
-        echo ""
-        echo -e "  ${DIM}Creating scratchpad...${RESET}"
+    if ! tmux has-session -t "=scratchpad" 2>/dev/null; then
         tmux new-session -d -s scratchpad -c "$PROJECTS_DIR"
-        tmux send-keys -t scratchpad "claude --dangerously-skip-permissions" Enter
-        tmux attach -t scratchpad
+        tmux send-keys -t "scratchpad" "clear && claude --dangerously-skip-permissions" Enter
+        tmux attach -t "=scratchpad"
+        check_exit_after_attach "scratchpad"
         return
     fi
 
@@ -569,7 +584,7 @@ handle_scratchpad() {
         sp_name="scratchpad-$(( sp_max + 1 ))"
     else
         sp_name="scratchpad-${sp_input}"
-        if tmux has-session -t "$sp_name" 2>/dev/null; then
+        if tmux has-session -t "=$sp_name" 2>/dev/null; then
             STATUS_MSG="Session '$sp_name' already exists."
             STATUS_COLOR="$RED"
             return
@@ -583,8 +598,9 @@ handle_scratchpad() {
     fi
 
     tmux new-session -d -s "$sp_name" -c "$PROJECTS_DIR"
-    tmux send-keys -t "$sp_name" "claude --dangerously-skip-permissions" Enter
-    tmux attach -t "$sp_name"
+    tmux send-keys -t "$sp_name" "clear && claude --dangerously-skip-permissions" Enter
+    tmux attach -t "=$sp_name"
+    check_exit_after_attach "$sp_name"
 }
 
 handle_rename() {
@@ -632,13 +648,13 @@ handle_rename() {
         return
     fi
 
-    if tmux has-session -t "$newname" 2>/dev/null; then
+    if tmux has-session -t "=$newname" 2>/dev/null; then
         STATUS_MSG="Session '$newname' already exists. Choose a different name."
         STATUS_COLOR="$RED"
         return
     fi
 
-    if tmux rename-session -t "$old_name" "$newname"; then
+    if tmux rename-session -t "=$old_name" "$newname"; then
         STATUS_MSG="Renamed '$old_name' to '$newname'."
         STATUS_COLOR="$GREEN"
     else
