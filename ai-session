@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# ── ai-session ──────────────────────────────────────────────────────────────
+# Wrapper for AI CLI tools. Launches the tool interactively, then auto-commits
+# any uncommitted changes on exit using a headless AI-generated commit message.
+# Usage: ai-session <claude|gemini>
+# ────────────────────────────────────────────────────────────────────────────
+
+TOOL="$1"
+
+if [ -z "$TOOL" ]; then
+    echo "Usage: ai-session <claude|gemini>"
+    exit 1
+fi
+
+# ── Launch tool interactively ─────────────────────────────────────────────
+
+case "$TOOL" in
+    claude)
+        claude --dangerously-skip-permissions
+        ;;
+    gemini)
+        gemini --yolo
+        ;;
+    *)
+        echo "Unknown tool: $TOOL"
+        exit 1
+        ;;
+esac
+
+# ── Auto-commit on exit ──────────────────────────────────────────────────
+
+# Only proceed if we're in a git repo
+if ! git rev-parse --git-dir &>/dev/null; then
+    exit 0
+fi
+
+# Only proceed if there are uncommitted changes
+if [ -z "$(git status --porcelain)" ]; then
+    exit 0
+fi
+
+echo ""
+echo "  Changes detected — running AI commit review..."
+
+# Stage tracked files only (no secrets risk)
+git add -u
+
+# Check if staging produced anything (changes might be untracked-only)
+if [ -z "$(git diff --cached --name-only)" ]; then
+    echo "  No tracked files changed. Skipping commit."
+    exit 0
+fi
+
+# Generate commit message via headless AI call
+DIFF_STAT=$(git diff --cached --stat)
+
+case "$TOOL" in
+    claude)
+        MSG=$(claude -p "Write a single-line git commit message (no quotes, no prefix like 'feat:') for these changes. Output ONLY the message, nothing else: $DIFF_STAT" --dangerously-skip-permissions 2>/dev/null)
+        ;;
+    gemini)
+        MSG=$(gemini -p "Write a single-line git commit message (no quotes, no prefix like 'feat:') for these changes. Output ONLY the message, nothing else: $DIFF_STAT" --yolo 2>/dev/null)
+        ;;
+esac
+
+# Fallback if AI call failed
+if [ -z "$MSG" ]; then
+    MSG="wip: auto-save from $TOOL session"
+fi
+
+# Clean up message — remove quotes, trim whitespace
+MSG=$(echo "$MSG" | sed "s/^[\"']*//;s/[\"']*$//" | xargs)
+
+git commit -m "$MSG"
+echo "  ✓ Committed: $MSG"
