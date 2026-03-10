@@ -53,24 +53,28 @@ if [ -z "$(git diff --cached --name-only)" ]; then
 fi
 
 # Generate commit message via headless AI call
-DIFF_STAT=$(git diff --cached --stat)
+DIFF=$(git diff --cached)
+DIFF_LINES=$(echo "$DIFF" | wc -l)
+if [ "$DIFF_LINES" -gt 200 ]; then
+    DIFF=$(git diff --cached --stat)
+fi
 
 case "$TOOL" in
     claude)
-        MSG=$(claude -p "Write a single-line git commit message (no quotes, no prefix like 'feat:') for these changes. Output ONLY the message, nothing else: $DIFF_STAT" --dangerously-skip-permissions 2>/dev/null)
+        MSG=$(claude -p "Write a single-line git commit message (no quotes, no prefix like 'feat:') for these changes. Output ONLY the message, nothing else: $DIFF" --dangerously-skip-permissions 2>/dev/null)
         ;;
     gemini)
-        MSG=$(gemini -p "Write a single-line git commit message (no quotes, no prefix like 'feat:') for these changes. Output ONLY the message, nothing else: $DIFF_STAT" --yolo 2>/dev/null)
+        MSG=$(gemini -p "Write a single-line git commit message (no quotes, no prefix like 'feat:') for these changes. Output ONLY the message, nothing else: $DIFF" --yolo 2>/dev/null)
         ;;
 esac
 
-# Fallback if AI call failed
+# Clean up message — remove quotes, trim whitespace
+MSG=$(echo "$MSG" | sed "s/^[\"']*//;s/[\"']*$//" | xargs)
+
+# Fallback if AI call failed or message is empty after cleanup
 if [ -z "$MSG" ]; then
     MSG="wip: auto-save from $TOOL session"
 fi
-
-# Clean up message — remove quotes, trim whitespace
-MSG=$(echo "$MSG" | sed "s/^[\"']*//;s/[\"']*$//" | xargs)
 
 git commit -m "$MSG"
 echo "  ✓ Committed: $MSG"
