@@ -68,6 +68,10 @@ fi
 # Create services dir if it doesn't exist
 mkdir -p "$SERVICES_DIR"
 
+# Ensure ai-session wrapper is available on PATH
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PATH="$SCRIPT_DIR:$PATH"
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 load_sessions() {
@@ -633,8 +637,11 @@ handle_scratchpad() {
 
     # No scratchpads exist — create the base scratchpad and attach
     if [ "$has_any_scratchpad" -eq 0 ]; then
+        prompt_tool "$PROJECTS_DIR"
+        local tool="$REPLY"
         tmux new-session -d -s scratchpad -c "$PROJECTS_DIR"
-        tmux send-keys -t "scratchpad" "clear && claude --dangerously-skip-permissions" Enter
+        tmux send-keys -t "scratchpad" "clear && ai-session $tool" Enter
+        tmux set-environment -t "=scratchpad" TOOL "$tool"
         tmux attach -t "=scratchpad"
         check_exit_after_attach "scratchpad"
         return
@@ -665,8 +672,11 @@ handle_scratchpad() {
         return
     fi
 
+    prompt_tool "$PROJECTS_DIR"
+    local tool="$REPLY"
     tmux new-session -d -s "$sp_name" -c "$PROJECTS_DIR"
-    tmux send-keys -t "$sp_name" "clear && claude --dangerously-skip-permissions" Enter
+    tmux send-keys -t "$sp_name" "clear && ai-session $tool" Enter
+    tmux set-environment -t "=$sp_name" TOOL "$tool"
     tmux attach -t "=$sp_name"
     check_exit_after_attach "$sp_name"
 }
