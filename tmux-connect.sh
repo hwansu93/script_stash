@@ -20,6 +20,7 @@ MAGENTA="\033[35m"
 BLUE="\033[34m"
 WHITE="\033[37m"
 RED="\033[31m"
+ORANGE="\033[38;5;208m"
 
 # ── Exclude patterns for directory listing ───────────────────────────────────
 
@@ -43,6 +44,7 @@ declare -A SESSION_DIRS
 ALL_DISPLAY_NAMES=()
 ALL_DISPLAY_TYPES=()
 ALL_DISPLAY_ATTACHED=()
+ALL_DISPLAY_TOOLS=()
 TOTAL_SESSIONS=0
 
 # Picker arrays
@@ -73,9 +75,11 @@ load_sessions() {
     local svc_names=()
     local scratch_names=()
     local -A session_attached
+    local -A session_tools
     ALL_DISPLAY_NAMES=()
     ALL_DISPLAY_TYPES=()
     ALL_DISPLAY_ATTACHED=()
+    ALL_DISPLAY_TOOLS=()
     SESSION_DIRS=()
 
     if ! tmux has-session 2>/dev/null; then
@@ -95,6 +99,10 @@ load_sessions() {
             SESSION_DIRS["$sname"]="$pdir"
         fi
 
+            local tool_val
+            tool_val=$(tmux show-environment -t "$sname" TOOL 2>/dev/null | grep -v '^-' | cut -d= -f2)
+            session_tools["$sname"]="${tool_val:-claude}"
+
         if [[ "$sname" == scratchpad* ]]; then
             scratch_names+=("$sname")
         elif [[ "$pdir" == "$SERVICES_DIR"* ]]; then
@@ -109,16 +117,19 @@ load_sessions() {
         ALL_DISPLAY_NAMES+=("$name")
         ALL_DISPLAY_TYPES+=("project")
         ALL_DISPLAY_ATTACHED+=("${session_attached[$name]}")
+        ALL_DISPLAY_TOOLS+=("${session_tools[$name]}")
     done
     for name in "${svc_names[@]}"; do
         ALL_DISPLAY_NAMES+=("$name")
         ALL_DISPLAY_TYPES+=("service")
         ALL_DISPLAY_ATTACHED+=("${session_attached[$name]}")
+        ALL_DISPLAY_TOOLS+=("${session_tools[$name]}")
     done
     for name in "${scratch_names[@]}"; do
         ALL_DISPLAY_NAMES+=("$name")
         ALL_DISPLAY_TYPES+=("scratchpad")
         ALL_DISPLAY_ATTACHED+=("${session_attached[$name]}")
+        ALL_DISPLAY_TOOLS+=("${session_tools[$name]}")
     done
 
     TOTAL_SESSIONS=${#ALL_DISPLAY_NAMES[@]}
@@ -293,17 +304,12 @@ draw_screen() {
             local attached_indicator=""
             local color_code=""
 
-            case "$stype" in
-                project)
-                    color_code="$GREEN"
-                    ;;
-                service)
-                    color_code="$MAGENTA"
-                    ;;
-                scratchpad)
-                    color_code="$BLUE"
-                    ;;
-            esac
+            local tool="${ALL_DISPLAY_TOOLS[$i]}"
+            if [[ "$tool" == "gemini" ]]; then
+                color_code="$BLUE"
+            else
+                color_code="$ORANGE"
+            fi
 
             if [[ "${ALL_DISPLAY_ATTACHED[$i]}" == "1" ]]; then
                 attached_indicator="${BOLD}${color_code}●${RESET}"
@@ -311,17 +317,7 @@ draw_screen() {
                 attached_indicator=" "
             fi
 
-            case "$stype" in
-                project)
-                    session_labels+=("$(printf "${BOLD}%d.${RESET} %b ${GREEN}%s${RESET}" "$num" "$attached_indicator" "$name")")
-                    ;;
-                service)
-                    session_labels+=("$(printf "${BOLD}%d.${RESET} %b ${MAGENTA}%s${RESET}" "$num" "$attached_indicator" "$name")")
-                    ;;
-                scratchpad)
-                    session_labels+=("$(printf "${BOLD}%d.${RESET} %b ${BLUE}%s${RESET}" "$num" "$attached_indicator" "$name")")
-                    ;;
-            esac
+            session_labels+=("$(printf "${BOLD}%d.${RESET} %b ${color_code}%s${RESET}" "$num" "$attached_indicator" "$name")")
         done
 
         # Dynamic columns with max 5 rows each, column-major fill
