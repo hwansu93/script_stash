@@ -103,9 +103,9 @@ load_sessions() {
             SESSION_DIRS["$sname"]="$pdir"
         fi
 
-            local tool_val
-            tool_val=$(tmux show-environment -t "$sname" TOOL 2>/dev/null | grep -v '^-' | cut -d= -f2)
-            session_tools["$sname"]="${tool_val:-claude}"
+        local tool_val
+        tool_val=$(tmux show-environment -t "$sname" TOOL 2>/dev/null | grep -v '^-' | cut -d= -f2)
+        session_tools["$sname"]="${tool_val:-claude}"
 
         if [[ "$sname" == scratchpad* ]]; then
             scratch_names+=("$sname")
@@ -504,10 +504,15 @@ setup_worktree() {
     # Create worktrees directory
     mkdir -p "$worktree_base"
 
-    # Reuse existing worktree
-    if [ -d "$worktree_dir" ]; then
+    # Reuse existing registered worktree
+    if [ -d "$worktree_dir" ] && git -C "$project_dir" worktree list --porcelain 2>/dev/null | grep -qF "worktree $worktree_dir"; then
         REPLY="$worktree_dir"
         return 0
+    fi
+
+    # Clean up orphaned worktree directory
+    if [ -d "$worktree_dir" ]; then
+        rm -rf "$worktree_dir"
     fi
 
     # Check for dirty working tree
