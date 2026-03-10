@@ -466,6 +466,71 @@ prompt_session_name() {
     fi
 }
 
+prompt_tool() {
+    local full_path="$1"
+
+    # Skip tool choice for non-git projects — default to claude
+    if ! git -C "$full_path" rev-parse --git-dir &>/dev/null 2>&1; then
+        REPLY="claude"
+        return 0
+    fi
+
+    echo ""
+    printf "  Tool (c/g) [c]: "
+    IFS= read -rsn1 tool_key
+    echo ""
+
+    case "$tool_key" in
+        g|G)
+            REPLY="gemini"
+            ;;
+        *)
+            REPLY="claude"
+            ;;
+    esac
+}
+
+setup_worktree() {
+    local project_dir="$1"
+    local sname="$2"
+    local worktree_base="/mnt/data/projects/.worktrees"
+    local worktree_dir="$worktree_base/${sname}-gemini"
+    local branch_name="gemini/$sname"
+
+    # Create worktrees directory
+    mkdir -p "$worktree_base"
+
+    # Reuse existing worktree
+    if [ -d "$worktree_dir" ]; then
+        REPLY="$worktree_dir"
+        return 0
+    fi
+
+    # Check for dirty working tree
+    if [ -n "$(git -C "$project_dir" status --porcelain)" ]; then
+        echo ""
+        echo "  ⚠ Uncommitted changes on current branch."
+        printf "  Stash them before creating worktree? (y/n) [y]: "
+        IFS= read -rsn1 stash_key
+        echo ""
+        if [[ "$stash_key" != "n" && "$stash_key" != "N" ]]; then
+            git -C "$project_dir" stash push -m "auto-stash before gemini worktree"
+        fi
+    fi
+
+    # Create worktree on new branch
+    if ! git -C "$project_dir" worktree add "$worktree_dir" -b "$branch_name" 2>/dev/null; then
+        # Branch already exists — check it out instead
+        if ! git -C "$project_dir" worktree add "$worktree_dir" "$branch_name" 2>/dev/null; then
+            echo "  ✗ Failed to create worktree."
+            return 1
+        fi
+    fi
+
+    REPLY="$worktree_dir"
+    return 0
+}
+
 launch_session() {
     local folder="$1"
     local root_dir="$2"
@@ -485,9 +550,20 @@ launch_session() {
         tmux attach -t "=$sname"
         check_exit_after_attach "$sname"
     else
-        tmux new-session -d -s "$sname" -c "$full_path"
-        tmux send-keys -t "$sname" "clear && claude --dangerously-skip-permissions" Enter
-        tmux set-environment -t "=$sname" PROJECT_DIR "$full_path"
+        prompt_tool "$full_path"
+        local tool="$REPLY"
+        local session_dir="$full_path"
+
+        if [[ "$tool" == "gemini" ]]; then
+            setup_worktree "$full_path" "$sname"
+            if [[ $? -ne 0 ]]; then return 1; fi
+            session_dir="$REPLY"
+        fi
+
+        tmux new-session -d -s "$sname" -c "$session_dir"
+        tmux send-keys -t "$sname" "clear && ai-session $tool" Enter
+        tmux set-environment -t "=$sname" PROJECT_DIR "$session_dir"
+        tmux set-environment -t "=$sname" TOOL "$tool"
         tmux attach -t "=$sname"
         check_exit_after_attach "$sname"
     fi
