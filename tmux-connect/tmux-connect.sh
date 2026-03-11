@@ -26,11 +26,6 @@ ORANGE="\033[38;5;208m"
 
 EXCLUDE_DIRS=(
     '.*'
-    'node_modules'
-    '.claude'
-    'docs'
-    'dotfiles'
-    'script_stash'
 )
 
 # ── State ────────────────────────────────────────────────────────────────────
@@ -570,7 +565,7 @@ launch_session() {
         fi
 
         tmux new-session -d -s "$sname" -c "$session_dir"
-        tmux send-keys -t "$sname" "clear && ai-session $tool" Enter
+        tmux send-keys -t "$sname" "clear && /mnt/data/projects/script_stash/tmux-connect/ai-session $tool" Enter
         tmux set-environment -t "=$sname" PROJECT_DIR "$session_dir"
         tmux set-environment -t "=$sname" TOOL "$tool"
         tmux attach -t "=$sname"
@@ -645,7 +640,7 @@ handle_scratchpad() {
         prompt_tool "$PROJECTS_DIR"
         local tool="$REPLY"
         tmux new-session -d -s scratchpad -c "$PROJECTS_DIR"
-        tmux send-keys -t "scratchpad" "clear && ai-session $tool" Enter
+        tmux send-keys -t "scratchpad" "clear && /mnt/data/projects/script_stash/tmux-connect/ai-session $tool" Enter
         tmux set-environment -t "=scratchpad" TOOL "$tool"
         tmux attach -t "=scratchpad"
         check_exit_after_attach "scratchpad"
@@ -680,7 +675,7 @@ handle_scratchpad() {
     prompt_tool "$PROJECTS_DIR"
     local tool="$REPLY"
     tmux new-session -d -s "$sp_name" -c "$PROJECTS_DIR"
-    tmux send-keys -t "$sp_name" "clear && ai-session $tool" Enter
+    tmux send-keys -t "$sp_name" "clear && /mnt/data/projects/script_stash/tmux-connect/ai-session $tool" Enter
     tmux set-environment -t "=$sp_name" TOOL "$tool"
     tmux attach -t "=$sp_name"
     check_exit_after_attach "$sp_name"
