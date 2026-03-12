@@ -426,7 +426,7 @@ draw_screen() {
     # Footer
     output+="\n"
     output+="  ${DIM}←/→ toggle  |  # + Enter = session  a-z + Enter = open${RESET}\n"
-    output+="  ${DIM}[s] Scratchpad  [n] New  [r] Rename  [q] Quit${RESET}\n"
+    output+="  ${DIM}[S] Scratchpad  [N] New  [R] Rename  [Q] Quit${RESET}\n"
 
     # Status message
     if [[ -n "$STATUS_MSG" ]]; then
@@ -879,76 +879,8 @@ while true; do
             continue
             ;;
         [a-z])
-            # Letters: s/n/r/q are commands; all others are picker selections
+            # Letters: all are picker selections
             case "$key" in
-                s)
-                    printf "%s" "$key"
-                    while true; do
-                        IFS= read -rsn1 ch
-                        if [[ "$ch" == '' ]]; then break; fi
-                        if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
-                            printf "\b \b"
-                            continue 2
-                        fi
-                        if [[ "$ch" == $'\e' ]]; then
-                            handle_escape_in_confirm "$key"
-                            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then continue 2; fi
-                        fi
-                    done
-                    handle_scratchpad
-                    continue
-                    ;;
-                n)
-                    printf "%s" "$key"
-                    while true; do
-                        IFS= read -rsn1 ch
-                        if [[ "$ch" == '' ]]; then break; fi
-                        if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
-                            printf "\b \b"
-                            continue 2
-                        fi
-                        if [[ "$ch" == $'\e' ]]; then
-                            handle_escape_in_confirm "$key"
-                            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then continue 2; fi
-                        fi
-                    done
-                    handle_new_folder
-                    continue
-                    ;;
-                r)
-                    printf "%s" "$key"
-                    while true; do
-                        IFS= read -rsn1 ch
-                        if [[ "$ch" == '' ]]; then break; fi
-                        if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
-                            printf "\b \b"
-                            continue 2
-                        fi
-                        if [[ "$ch" == $'\e' ]]; then
-                            handle_escape_in_confirm "$key"
-                            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then continue 2; fi
-                        fi
-                    done
-                    handle_rename
-                    continue
-                    ;;
-                q)
-                    printf "%s" "$key"
-                    while true; do
-                        IFS= read -rsn1 ch
-                        if [[ "$ch" == '' ]]; then break; fi
-                        if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
-                            printf "\b \b"
-                            continue 2
-                        fi
-                        if [[ "$ch" == $'\e' ]]; then
-                            handle_escape_in_confirm "$key"
-                            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then continue 2; fi
-                        fi
-                    done
-                    echo ""
-                    exit 0
-                    ;;
                 *)
                     # Picker letter selection
                     printf "%s" "$key"
