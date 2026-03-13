@@ -788,21 +788,32 @@ handle_new_folder() {
 
 # ── Main Loop ────────────────────────────────────────────────────────────────
 
+skip_reload=0
+pushback_key=""
 while true; do
     STATUS_MSG=""
     STATUS_COLOR=""
-    load_sessions
-
-    if [[ "$CURRENT_MODE" == "projects" ]]; then
-        load_items "$PROJECTS_DIR"
+    if [[ "$skip_reload" -eq 1 ]]; then
+        skip_reload=0
     else
-        load_items "$SERVICES_DIR"
+        load_sessions
+
+        if [[ "$CURRENT_MODE" == "projects" ]]; then
+            load_items "$PROJECTS_DIR"
+        else
+            load_items "$SERVICES_DIR"
+        fi
     fi
 
     draw_screen
 
-    # Read first character
-    IFS= read -rsn1 key
+    # Read first character (or consume a pushed-back key)
+    if [[ -n "$pushback_key" ]]; then
+        key="$pushback_key"
+        pushback_key=""
+    else
+        IFS= read -rsn1 key
+    fi
 
     # Check for escape sequence (arrow keys, mouse clicks, focus events)
     if [[ "$key" == $'\e' ]]; then
@@ -840,30 +851,31 @@ while true; do
             while true; do
                 IFS= read -rsn1 ch
                 if [[ "$ch" == '' ]]; then  # Enter
-                    break
+                    if [[ -n "$input" ]]; then break; fi
+                    # Empty input on Enter — stay in inner loop, no redraw needed
                 elif [[ "$ch" == $'\e' ]]; then
                     handle_escape_in_confirm "$input"
                     if [[ "$ESCAPE_RESULT" == "cancel" ]]; then
                         num_cancelled=1
                         break
                     fi
-                    continue
                 elif [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then  # Backspace
                     if [[ ${#input} -gt 0 ]]; then
                         input="${input%?}"
                         printf "\b \b"
                     fi
+                    # If input is already empty, stay in inner loop (no redraw needed)
                 elif [[ "$ch" =~ [0-9] ]]; then
                     input="${input}${ch}"
                     printf "%s" "$ch"
+                elif [[ -z "$input" && "$ch" =~ [a-zA-Z] ]]; then
+                    pushback_key="$ch"
+                    num_cancelled=1
+                    break
                 fi
             done
 
             if [[ "$num_cancelled" -eq 1 ]]; then
-                continue
-            fi
-
-            if [[ -z "$input" ]]; then
                 continue
             fi
 
@@ -889,28 +901,32 @@ while true; do
                     while true; do
                         IFS= read -rsn1 ch
                         if [[ "$ch" == '' ]]; then  # Enter
-                            break
+                            if [[ -n "$letter" ]]; then break; fi
+                            # Empty letter on Enter — stay in inner loop, no redraw needed
                         elif [[ "$ch" == $'\e' ]]; then
                             handle_escape_in_confirm "$letter"
                             if [[ "$ESCAPE_RESULT" == "cancel" ]]; then
                                 letter_cancelled=1
                                 break
                             fi
-                            continue
                         elif [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then  # Backspace
                             if [[ -n "$letter" ]]; then
                                 letter=""
                                 printf "\b \b"
                             fi
+                            # If letter is already empty, stay in inner loop (no redraw needed)
+                        elif [[ -z "$letter" && "$ch" =~ [a-z] ]]; then
+                            letter="$ch"
+                            printf "%s" "$ch"
+                        elif [[ -z "$letter" && "$ch" =~ [A-Z] ]]; then
+                            pushback_key="$ch"
+                            letter_cancelled=1
+                            break
                         fi
                     done
 
                     if [[ "$letter_cancelled" -eq 1 ]]; then
                         continue 2
-                    fi
-
-                    if [[ -z "$letter" ]]; then
-                        continue
                     fi
 
                     # Convert letter to picker index: a=0, b=1, ...
@@ -935,6 +951,7 @@ while true; do
                         if [[ "$ch" == '' ]]; then break; fi
                         if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
                             printf "\b \b"
+                            skip_reload=1
                             continue 2
                         fi
                         if [[ "$ch" == $'\e' ]]; then
@@ -951,6 +968,7 @@ while true; do
                         if [[ "$ch" == '' ]]; then break; fi
                         if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
                             printf "\b \b"
+                            skip_reload=1
                             continue 2
                         fi
                         if [[ "$ch" == $'\e' ]]; then
@@ -967,6 +985,7 @@ while true; do
                         if [[ "$ch" == '' ]]; then break; fi
                         if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
                             printf "\b \b"
+                            skip_reload=1
                             continue 2
                         fi
                         if [[ "$ch" == $'\e' ]]; then
@@ -983,6 +1002,7 @@ while true; do
                         if [[ "$ch" == '' ]]; then break; fi
                         if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
                             printf "\b \b"
+                            skip_reload=1
                             continue 2
                         fi
                         if [[ "$ch" == $'\e' ]]; then
