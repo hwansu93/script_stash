@@ -13,6 +13,10 @@ if [ -z "$TOOL" ]; then
     exit 1
 fi
 
+# Pin the working directory before launching the tool so git operations
+# always target the correct repo even if the tool changes the cwd.
+SESSION_DIR="$(pwd)"
+
 # ── Launch tool interactively ─────────────────────────────────────────────
 
 case "$TOOL" in
@@ -30,13 +34,18 @@ esac
 
 # ── Auto-commit on exit ──────────────────────────────────────────────────
 
-# Only proceed if we're in a git repo
+# Return to the session's original directory so git targets the right repo.
+cd "$SESSION_DIR"
+
+# Skip auto-commit for scratchpad sessions: they start in the projects root,
+# not inside a specific project repo. Guard with git rev-parse as well to
+# catch any other non-repo directories.
 if ! git rev-parse --git-dir &>/dev/null; then
     exit 0
 fi
 
-# Only proceed if there are uncommitted changes
-if [ -z "$(git status --porcelain)" ]; then
+# Only proceed if there are uncommitted tracked changes
+if git diff --quiet && git diff --cached --quiet; then
     exit 0
 fi
 
