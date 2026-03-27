@@ -8,6 +8,7 @@
 
 PROJECTS_DIR="/mnt/data/projects"
 SERVICES_DIR="/mnt/data/services"
+SCRATCH_DIR="/mnt/data/scratch"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -62,6 +63,7 @@ fi
 
 # Create services dir if it doesn't exist
 mkdir -p "$SERVICES_DIR"
+mkdir -p "$SCRATCH_DIR"
 
 # Ensure ai-session wrapper is available on PATH
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -637,9 +639,9 @@ handle_scratchpad() {
 
     # No scratchpads exist — create the base scratchpad and attach
     if [ "$has_any_scratchpad" -eq 0 ]; then
-        prompt_tool "$PROJECTS_DIR"
+        prompt_tool "$SCRATCH_DIR"
         local tool="$REPLY"
-        tmux new-session -d -s scratchpad -c "$PROJECTS_DIR"
+        tmux new-session -d -s scratchpad -c "$SCRATCH_DIR"
         tmux send-keys -t "scratchpad" "clear && /mnt/data/projects/script_stash/tmux-connect/ai-session $tool" Enter
         tmux set-environment -t "=scratchpad" TOOL "$tool"
         tmux attach -t "=scratchpad"
@@ -672,9 +674,9 @@ handle_scratchpad() {
         return
     fi
 
-    prompt_tool "$PROJECTS_DIR"
+    prompt_tool "$SCRATCH_DIR"
     local tool="$REPLY"
-    tmux new-session -d -s "$sp_name" -c "$PROJECTS_DIR"
+    tmux new-session -d -s "$sp_name" -c "$SCRATCH_DIR"
     tmux send-keys -t "$sp_name" "clear && /mnt/data/projects/script_stash/tmux-connect/ai-session $tool" Enter
     tmux set-environment -t "=$sp_name" TOOL "$tool"
     tmux attach -t "=$sp_name"
