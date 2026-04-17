@@ -949,7 +949,7 @@ while true; do
             ;;
         '')
             filter_picker_items "$FILTER_BUFFER"
-            if (( ${#FILTERED_INDICES[@]} == 1 )); then
+            if (( ${#FILTERED_INDICES[@]} > 0 )); then
                 launch_from_picker "${FILTERED_INDICES[0]}"
             fi
             ;;
