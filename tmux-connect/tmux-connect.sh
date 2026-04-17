@@ -48,6 +48,10 @@ AVAILABLE_ITEMS=()
 TOTAL_PICKER_ITEMS=0
 FILTER_BUFFER=""
 FILTERED_INDICES=()
+FILTERED_MATCH_COUNT=0
+SELECTED_PICKER_POS=0
+PICKER_SCROLL_OFFSET=0
+LAST_PICKER_ROWS=0
 
 # ── Guard: already inside tmux ───────────────────────────────────────────────
 
@@ -176,6 +180,209 @@ strip_ansi() {
     echo -e "$1" | sed 's/\x1b\[[0-9;]*m//g'
 }
 
+get_term_cols() {
+    local cols
+    cols=$(tput cols 2>/dev/null)
+    if [[ ! "$cols" =~ ^[0-9]+$ ]] || (( cols < 40 )); then
+        cols=80
+    fi
+    echo "$cols"
+}
+
+get_term_lines() {
+    local lines
+    lines=$(tput lines 2>/dev/null)
+    if [[ ! "$lines" =~ ^[0-9]+$ ]] || (( lines < 18 )); then
+        lines=24
+    fi
+    echo "$lines"
+}
+
+repeat_char() {
+    local char="$1"
+    local count="$2"
+    if (( count <= 0 )); then
+        return
+    fi
+    printf "%${count}s" "" | tr ' ' "$char"
+}
+
+truncate_text() {
+    local text="$1"
+    local max_width="$2"
+    local text_len=${#text}
+
+    if (( max_width <= 0 )); then
+        echo ""
+    elif (( text_len <= max_width )); then
+        echo "$text"
+    elif (( max_width <= 3 )); then
+        echo "${text:0:max_width}"
+    else
+        echo "${text:0:$((max_width - 3))}..."
+    fi
+}
+
+fuzzy_match_score() {
+    local query="${1,,}"
+    local candidate="${2,,}"
+    local qlen=${#query}
+    local clen=${#candidate}
+    local qi=0
+    local last_match=-2
+    local score=0
+    local idx
+    local char
+    local prev
+
+    if (( qlen == 0 )); then
+        echo 0
+        return
+    fi
+
+    for (( idx = 0; idx < clen && qi < qlen; idx++ )); do
+        char="${candidate:idx:1}"
+        if [[ "$char" == "${query:qi:1}" ]]; then
+            score=$(( score + 10 ))
+            if (( idx == last_match + 1 )); then
+                score=$(( score + 5 ))
+            fi
+            if (( idx == 0 )); then
+                score=$(( score + 4 ))
+            else
+                prev="${candidate:idx-1:1}"
+                if [[ "$prev" == "-" || "$prev" == "_" || "$prev" == "." || "$prev" == "/" || "$prev" == " " ]]; then
+                    score=$(( score + 4 ))
+                fi
+            fi
+            last_match=$idx
+            qi=$(( qi + 1 ))
+        fi
+    done
+
+    if (( qi != qlen )); then
+        echo -1
+        return
+    fi
+
+    score=$(( score - clen ))
+    echo "$score"
+}
+
+is_filterable_key() {
+    local key="$1"
+    [[ "$key" =~ ^[[:graph:]]$ ]]
+}
+
+current_root_dir() {
+    if [[ "$CURRENT_MODE" == "projects" ]]; then
+        echo "$PROJECTS_DIR"
+    else
+        echo "$SERVICES_DIR"
+    fi
+}
+
+reset_picker_selection() {
+    SELECTED_PICKER_POS=0
+    PICKER_SCROLL_OFFSET=0
+}
+
+sync_picker_selection() {
+    if (( FILTERED_MATCH_COUNT <= 0 )); then
+        SELECTED_PICKER_POS=0
+        PICKER_SCROLL_OFFSET=0
+        return
+    fi
+
+    if (( SELECTED_PICKER_POS < 0 )); then
+        SELECTED_PICKER_POS=0
+    elif (( SELECTED_PICKER_POS >= FILTERED_MATCH_COUNT )); then
+        SELECTED_PICKER_POS=$(( FILTERED_MATCH_COUNT - 1 ))
+    fi
+
+    if (( LAST_PICKER_ROWS > 0 )); then
+        if (( SELECTED_PICKER_POS < PICKER_SCROLL_OFFSET )); then
+            PICKER_SCROLL_OFFSET=$SELECTED_PICKER_POS
+        elif (( SELECTED_PICKER_POS >= PICKER_SCROLL_OFFSET + LAST_PICKER_ROWS )); then
+            PICKER_SCROLL_OFFSET=$(( SELECTED_PICKER_POS - LAST_PICKER_ROWS + 1 ))
+        fi
+    fi
+
+    if (( PICKER_SCROLL_OFFSET < 0 )); then
+        PICKER_SCROLL_OFFSET=0
+    fi
+
+    if (( PICKER_SCROLL_OFFSET > SELECTED_PICKER_POS )); then
+        PICKER_SCROLL_OFFSET=$SELECTED_PICKER_POS
+    fi
+}
+
+move_picker_selection() {
+    local delta="$1"
+    if (( FILTERED_MATCH_COUNT <= 0 )); then
+        return
+    fi
+
+    SELECTED_PICKER_POS=$(( SELECTED_PICKER_POS + delta ))
+    if (( SELECTED_PICKER_POS < 0 )); then
+        SELECTED_PICKER_POS=0
+    elif (( SELECTED_PICKER_POS >= FILTERED_MATCH_COUNT )); then
+        SELECTED_PICKER_POS=$(( FILTERED_MATCH_COUNT - 1 ))
+    fi
+    sync_picker_selection
+}
+
+set_picker_filter() {
+    FILTER_BUFFER="$1"
+    filter_picker_items "$FILTER_BUFFER"
+    sync_picker_selection
+}
+
+append_picker_filter() {
+    set_picker_filter "${FILTER_BUFFER}$1"
+}
+
+backspace_picker_filter() {
+    if [[ -n "$FILTER_BUFFER" ]]; then
+        set_picker_filter "${FILTER_BUFFER%?}"
+    fi
+}
+
+clear_picker_filter() {
+    if [[ -n "$FILTER_BUFFER" ]]; then
+        set_picker_filter ""
+    fi
+}
+
+set_mode() {
+    local new_mode="$1"
+    CURRENT_MODE="$new_mode"
+    reset_picker_selection
+    set_picker_filter ""
+}
+
+toggle_mode() {
+    if [[ "$CURRENT_MODE" == "projects" ]]; then
+        set_mode "services"
+    else
+        set_mode "projects"
+    fi
+}
+
+refresh_screen_data() {
+    load_sessions
+    load_items "$(current_root_dir)"
+    filter_picker_items "$FILTER_BUFFER"
+    sync_picker_selection
+}
+
+launch_selected_picker_item() {
+    if (( FILTERED_MATCH_COUNT <= 0 )); then
+        return
+    fi
+    launch_from_picker "${FILTERED_INDICES[$SELECTED_PICKER_POS]}"
+}
+
 # Handle escape sequences in confirmation loops
 # Sets ESCAPE_RESULT to "cancel" (standalone Esc) or "continue" (consumed sequence)
 handle_escape_in_confirm() {
@@ -190,18 +397,8 @@ handle_escape_in_confirm() {
         IFS= read -rsn1 -t 0.2 seq2
         case "$seq2" in
             C|D)
-                if [[ "$CURRENT_MODE" == "projects" ]]; then
-                    CURRENT_MODE="services"
-                else
-                    CURRENT_MODE="projects"
-                fi
-                FILTER_BUFFER=""
-                if [[ "$CURRENT_MODE" == "projects" ]]; then
-                    load_items "$PROJECTS_DIR"
-                else
-                    load_items "$SERVICES_DIR"
-                fi
-                filter_picker_items "$FILTER_BUFFER"
+                toggle_mode
+                refresh_screen_data
                 draw_screen
                 printf "%s" "$cmd_key"
                 ESCAPE_RESULT="continue"
@@ -263,74 +460,120 @@ read_input_with_cancel() {
 
 filter_picker_items() {
     local filter_str="$1"
-    local lowered_filter="${filter_str,,}"
     local i
     local item_name
-    local lowered_name
+    local score
+    local scored_matches=()
 
     FILTERED_INDICES=()
+    FILTERED_MATCH_COUNT=0
     for (( i = 0; i < TOTAL_PICKER_ITEMS; i++ )); do
         item_name="${AVAILABLE_ITEMS[$i]}"
-        if [[ -z "$lowered_filter" ]]; then
+        if [[ -z "$filter_str" ]]; then
             FILTERED_INDICES+=("$i")
         else
-            lowered_name="${item_name,,}"
-            if [[ "$lowered_name" == *"$lowered_filter"* ]]; then
-                FILTERED_INDICES+=("$i")
+            score=$(fuzzy_match_score "$filter_str" "$item_name")
+            if (( score >= 0 )); then
+                scored_matches+=("${score}:${i}")
             fi
         fi
     done
+
+    if [[ -n "$filter_str" && ${#scored_matches[@]} -gt 0 ]]; then
+        while IFS=: read -r _score match_idx; do
+            [[ -n "$match_idx" ]] && FILTERED_INDICES+=("$match_idx")
+        done < <(printf '%s\n' "${scored_matches[@]}" | sort -t: -k1,1nr -k2,2n)
+    fi
+
+    FILTERED_MATCH_COUNT=${#FILTERED_INDICES[@]}
 }
 
 # ── Screen Builder ───────────────────────────────────────────────────────────
 
-draw_screen() {
-    local output=""
-    local inner_width=38
-    local border
-    border=$(printf '%0.s─' $(seq 1 $inner_width))
-    local title="Tmux Connect"
-    local title_len=${#title}
-    local pad_total=$(( inner_width - title_len ))
-    local left_pad=$(( pad_total / 2 ))
-    local right_pad=$(( pad_total - left_pad ))
+RENDER_OUTPUT=""
+RENDER_CONTENT_WIDTH=0
+RENDER_RULE_WIDTH=0
+RENDER_SESSION_ROWS=0
+RENDER_PICKER_ROWS=0
+RENDER_LEFT_WIDTH=0
+RENDER_RIGHT_WIDTH=0
+LEFT_PANE_OUTPUT=""
+RIGHT_PANE_OUTPUT=""
 
-    # Header
-    output+="\n"
-    output+="  ${BOLD}${CYAN}┌${border}┐${RESET}\n"
-    output+="  ${BOLD}${CYAN}│${RESET}"
-    output+="$(printf '%*s' "$left_pad" '')${BOLD}${title}${RESET}$(printf '%*s' "$right_pad" '')"
-    output+="${BOLD}${CYAN}│${RESET}\n"
-    output+="  ${BOLD}${CYAN}└${border}┘${RESET}\n"
-    output+="\n"
+append_render() {
+    RENDER_OUTPUT+="$1"
+}
 
-    # Sessions section
-    output+="  ${BOLD}${WHITE}Sessions${RESET}\n"
+append_left_render() {
+    LEFT_PANE_OUTPUT+="$1"
+}
 
-    if [ "$TOTAL_SESSIONS" -eq 0 ]; then
-        output+="    ${DIM}(no active sessions)${RESET}\n"
+append_right_render() {
+    RIGHT_PANE_OUTPUT+="$1"
+}
+
+pad_visible_line() {
+    local line="$1"
+    local target_width="$2"
+    local visible
+    local pad
+
+    visible=$(strip_ansi "$line")
+    pad=$(( target_width - ${#visible} ))
+    if (( pad < 0 )); then
+        pad=0
+    fi
+
+    printf "%b%*s" "$line" "$pad" ""
+}
+
+render_header() {
+    local mode_badge
+    local subtitle
+
+    if [[ "$CURRENT_MODE" == "projects" ]]; then
+        mode_badge="${BOLD}${GREEN}[ Projects ]${RESET}"
+        subtitle="Browse launchable projects and active sessions"
     else
-        # Compute tight column width based on longest session label
-        local max_session_len=0
-        for (( i = 0; i < TOTAL_SESSIONS; i++ )); do
-            local num=$(( i + 1 ))
-            local name="${ALL_DISPLAY_NAMES[$i]}"
-            # "N. X name" where N is number, X is attached indicator (2 chars)
-            local label_len=$(( ${#num} + 2 + 1 + ${#name} ))
-            (( label_len > max_session_len )) && max_session_len=$label_len
-        done
-        local col_width=$(( max_session_len + 4 ))
+        mode_badge="${BOLD}${MAGENTA}[ Services ]${RESET}"
+        subtitle="Browse launchable services and active sessions"
+    fi
 
-        # Build labels for all sessions
-        local -a session_labels=()
-        for (( i = 0; i < TOTAL_SESSIONS; i++ )); do
-            local num=$(( i + 1 ))
-            local name="${ALL_DISPLAY_NAMES[$i]}"
-            local stype="${ALL_DISPLAY_TYPES[$i]}"
-            local attached_indicator=""
-            local color_code=""
+    append_render "\n"
+    append_render "  ${BOLD}${CYAN}Tmux Connect${RESET}\n"
+    append_render "  ${mode_badge} ${DIM}${subtitle}${RESET}\n"
+    append_render "  ${DIM}$(repeat_char "-" "$RENDER_RULE_WIDTH")${RESET}\n"
+    append_render "  ${DIM}Enter launch selected${RESET}   ${DIM}Up/Down move${RESET}   ${DIM}Left/Right switch mode${RESET}\n\n"
+}
 
-            local tool="${ALL_DISPLAY_TOOLS[$i]}"
+render_left_pane() {
+    local displayed_sessions=0
+    local remaining_sessions=0
+    local i
+    local num
+    local name
+    local color_code
+    local attached_indicator
+    local prefix_plain
+    local max_name_width
+    local shown_name
+    local tool
+
+    LEFT_PANE_OUTPUT=""
+
+    append_left_render "  ${BOLD}${WHITE}Sessions${RESET}"
+    if (( TOTAL_SESSIONS > 0 )); then
+        append_left_render " ${DIM}(${TOTAL_SESSIONS})${RESET}"
+    fi
+    append_left_render "\n"
+
+    if (( TOTAL_SESSIONS == 0 )); then
+        append_left_render "    ${DIM}(no active sessions)${RESET}\n"
+    else
+        for (( i = 0; i < TOTAL_SESSIONS && displayed_sessions < RENDER_SESSION_ROWS; i++ )); do
+            num=$(( i + 1 ))
+            name="${ALL_DISPLAY_NAMES[$i]}"
+            tool="${ALL_DISPLAY_TOOLS[$i]}"
             if [[ "$tool" == "gemini" ]]; then
                 color_code="$BLUE"
             else
@@ -338,138 +581,191 @@ draw_screen() {
             fi
 
             if [[ "${ALL_DISPLAY_ATTACHED[$i]}" == "1" ]]; then
-                attached_indicator="${BOLD}${color_code}●${RESET}"
+                attached_indicator="${BOLD}${color_code}*${RESET}"
             else
                 attached_indicator=" "
             fi
 
-            session_labels+=("$(printf "${BOLD}%d.${RESET} %b ${color_code}%s${RESET}" "$num" "$attached_indicator" "$name")")
+            prefix_plain="${num}. * "
+            max_name_width=$(( RENDER_LEFT_WIDTH - 6 - ${#prefix_plain} ))
+            (( max_name_width < 8 )) && max_name_width=8
+            shown_name=$(truncate_text "$name" "$max_name_width")
+            append_left_render "    ${BOLD}${num}.${RESET} ${attached_indicator} ${color_code}${shown_name}${RESET}\n"
+            displayed_sessions=$(( displayed_sessions + 1 ))
         done
 
-        # Dynamic columns with max 5 rows each, column-major fill
-        local rows_per_col=5
-        local total_labels=${#session_labels[@]}
-        local num_cols=$(( (total_labels + rows_per_col - 1) / rows_per_col ))
-        for (( r = 0; r < rows_per_col; r++ )); do
-            local row_line=""
-            local row_has_content=0
-            for (( c = 0; c < num_cols; c++ )); do
-                local idx=$(( c * rows_per_col + r ))
-                if (( idx < total_labels )); then
-                    row_has_content=1
-                    local cell="${session_labels[$idx]}"
-                    if (( c < num_cols - 1 )); then
-                        # Pad to col_width
-                        local cell_plain
-                        cell_plain=$(strip_ansi "$cell")
-                        local cell_len=${#cell_plain}
-                        local pad=$(( col_width - cell_len ))
-                        [ $pad -lt 1 ] && pad=1
-                        row_line+="$(printf "%b%*s " "$cell" "$pad" "")"
-                    else
-                        row_line+="$(printf "%b" "$cell")"
-                    fi
-                fi
-            done
-            if (( row_has_content )); then
-                output+="   ${row_line}\n"
-            fi
-        done
+        remaining_sessions=$(( TOTAL_SESSIONS - displayed_sessions ))
+        if (( remaining_sessions > 0 )); then
+            append_left_render "    ${DIM}(+${remaining_sessions} more)${RESET}\n"
+        fi
     fi
 
-    output+="\n"
+    append_left_render "\n"
+    append_left_render "  ${BOLD}${WHITE}Actions${RESET}\n"
+    append_left_render "    ${DIM}[S] Scratchpad${RESET}\n"
+    append_left_render "    ${DIM}[N] New folder${RESET}\n"
+    append_left_render "    ${DIM}[R] Rename${RESET}\n"
+    append_left_render "    ${DIM}[Q] Quit${RESET}\n"
+    append_left_render "\n"
+    append_left_render "  ${BOLD}${WHITE}Hints${RESET}\n"
+    append_left_render "    ${DIM}[1-9] Attach${RESET}\n"
+    append_left_render "    ${DIM}Type to search${RESET}\n"
+    append_left_render "    ${DIM}Esc clears filter${RESET}\n"
+}
 
-    # Toggle bar
-    if [[ "$CURRENT_MODE" == "projects" ]]; then
-        output+="  ${BOLD}${GREEN}[► Projects]${RESET}   ${DIM}Services${RESET}\n"
-    else
-        output+="  ${DIM}Projects${RESET}   ${BOLD}${MAGENTA}[► Services]${RESET}\n"
-    fi
-    output+="  $(printf '%0.s─' $(seq 1 38))\n"
-
-    # Picker items
+render_right_pane() {
     local active_filter_display="${FILTER_BUFFER:-}"
+    local picker_color
+    local display_limit
+    local start_index
+    local end_index
+    local display_pos
+    local match_idx
+    local name
+    local shown_name
+    local max_name_width
+    local remaining_picker
+    local label
+
+    RIGHT_PANE_OUTPUT=""
+
     if [[ -z "$active_filter_display" ]]; then
         active_filter_display="(none)"
     fi
-    output+="  ${DIM}Filter:${RESET} ${BOLD}${WHITE}${active_filter_display}${RESET}\n"
+    active_filter_display=$(truncate_text "$active_filter_display" $(( RENDER_RIGHT_WIDTH - 22 )))
 
-    local visible_picker_count=${#FILTERED_INDICES[@]}
-    if [ "$TOTAL_PICKER_ITEMS" -eq 0 ]; then
-        local label
-        if [[ "$CURRENT_MODE" == "projects" ]]; then
-            label="projects"
-        else
-            label="services"
-        fi
-        output+="   ${DIM}(no available ${label})${RESET}\n"
-    elif [ "$visible_picker_count" -eq 0 ]; then
-        output+="   ${DIM}(no matches)${RESET}\n"
+    if [[ "$CURRENT_MODE" == "projects" ]]; then
+        append_right_render "  ${BOLD}${GREEN}[Projects]${RESET}   ${DIM}Services${RESET}\n"
+        picker_color="$GREEN"
+        label="projects"
     else
-        local picker_color
-        if [[ "$CURRENT_MODE" == "projects" ]]; then
-            picker_color="$GREEN"
+        append_right_render "  ${DIM}Projects${RESET}   ${BOLD}${MAGENTA}[Services]${RESET}\n"
+        picker_color="$MAGENTA"
+        label="services"
+    fi
+    append_right_render "  ${DIM}$(repeat_char "-" "$RENDER_RIGHT_WIDTH")${RESET}\n"
+
+    append_right_render "  ${BOLD}${WHITE}Available To Launch${RESET}\n"
+    append_right_render "  ${DIM}Filter:${RESET} ${BOLD}${WHITE}${active_filter_display}${RESET}"
+    append_right_render " ${DIM}(${FILTERED_MATCH_COUNT}/${TOTAL_PICKER_ITEMS})${RESET}\n"
+
+    if (( TOTAL_PICKER_ITEMS == 0 )); then
+        append_right_render "   ${DIM}No available ${label}.${RESET}\n"
+        append_right_render "   ${DIM}Press N to create one.${RESET}\n"
+        return
+    fi
+
+    if (( FILTERED_MATCH_COUNT == 0 )); then
+        append_right_render "   ${DIM}No matches for \"${FILTER_BUFFER}\".${RESET}\n"
+        append_right_render "   ${DIM}Backspace edits. Esc clears.${RESET}\n"
+        return
+    fi
+
+    LAST_PICKER_ROWS=$RENDER_PICKER_ROWS
+    sync_picker_selection
+
+    display_limit=$RENDER_PICKER_ROWS
+    start_index=$PICKER_SCROLL_OFFSET
+    end_index=$(( start_index + display_limit ))
+    if (( end_index > FILTERED_MATCH_COUNT )); then
+        end_index=$FILTERED_MATCH_COUNT
+    fi
+
+    name="${AVAILABLE_ITEMS[${FILTERED_INDICES[$SELECTED_PICKER_POS]}]}"
+    shown_name=$(truncate_text "$name" $(( RENDER_RIGHT_WIDTH - 14 )))
+    append_right_render "  ${DIM}Selected:${RESET} ${BOLD}${picker_color}${shown_name}${RESET}\n"
+
+    for (( display_pos = start_index; display_pos < end_index; display_pos++ )); do
+        match_idx="${FILTERED_INDICES[$display_pos]}"
+        name="${AVAILABLE_ITEMS[$match_idx]}"
+        if (( display_pos == SELECTED_PICKER_POS )); then
+            max_name_width=$(( RENDER_RIGHT_WIDTH - 11 ))
+            shown_name=$(truncate_text "$name" "$max_name_width")
+            append_right_render "   ${BOLD}${WHITE}>${RESET} ${BOLD}${picker_color}${shown_name}${RESET} ${DIM}[enter]${RESET}\n"
         else
-            picker_color="$MAGENTA"
+            max_name_width=$(( RENDER_RIGHT_WIDTH - 7 ))
+            shown_name=$(truncate_text "$name" "$max_name_width")
+            append_right_render "     ${picker_color}${shown_name}${RESET}\n"
         fi
+    done
 
-        # Compute tight column width based on longest item name
-        local max_len=0
-        local idx
-        for idx in "${FILTERED_INDICES[@]}"; do
-            local item="${AVAILABLE_ITEMS[$idx]}"
-            (( ${#item} > max_len )) && max_len=${#item}
-        done
-        local col_width=$(( max_len + 2 ))
-
-        local -a picker_labels=()
-        for idx in "${FILTERED_INDICES[@]}"; do
-            local name="${AVAILABLE_ITEMS[$idx]}"
-            picker_labels+=("$(printf "${picker_color}%s${RESET}" "$name")")
-        done
-
-        # Dynamic columns with max 5 rows each, column-major fill
-        local rows_per_col=5
-        local total_picker=${#picker_labels[@]}
-        local num_cols=$(( (total_picker + rows_per_col - 1) / rows_per_col ))
-        for (( r = 0; r < rows_per_col; r++ )); do
-            local row_line=""
-            local row_has_content=0
-            for (( c = 0; c < num_cols; c++ )); do
-                local idx=$(( c * rows_per_col + r ))
-                if (( idx < total_picker )); then
-                    row_has_content=1
-                    local cell="${picker_labels[$idx]}"
-                    if (( c < num_cols - 1 )); then
-                        # Pad to col_width
-                        local cell_plain
-                        cell_plain=$(strip_ansi "$cell")
-                        local cell_len=${#cell_plain}
-                        local pad=$(( col_width - cell_len ))
-                        [ $pad -lt 1 ] && pad=1
-                        row_line+="$(printf "%b%*s " "$cell" "$pad" "")"
-                    else
-                        row_line+="$(printf "%b" "$cell")"
-                    fi
-                fi
-            done
-            if (( row_has_content )); then
-                output+="   ${row_line}\n"
-            fi
-        done
+    if (( start_index > 0 )); then
+        append_right_render "   ${DIM}(↑ ${start_index} above)${RESET}\n"
     fi
 
-    # Footer
-    output+="\n"
-    output+="  ${DIM}type to filter • Enter pick • Bksp del • Esc clear • ←→ toggle • 1-9 session • S/N/R/Q cmd${RESET}\n"
+    remaining_picker=$(( FILTERED_MATCH_COUNT - end_index ))
+    if (( remaining_picker > 0 )); then
+        append_right_render "   ${DIM}(↓ ${remaining_picker} more matches)${RESET}\n"
+    fi
+}
 
-    # Status message
+draw_screen() {
+    local term_cols
+    local term_lines
+    local available_rows
+    local divider="  ${DIM}|${RESET} "
+    local divider_visible_width=3
+    local -a left_lines=()
+    local -a right_lines=()
+    local max_lines=0
+    local i
+    local left_line
+    local right_line
+
+    RENDER_OUTPUT=""
+    term_cols=$(get_term_cols)
+    term_lines=$(get_term_lines)
+    RENDER_CONTENT_WIDTH=$(( term_cols - 6 ))
+    (( RENDER_CONTENT_WIDTH < 22 )) && RENDER_CONTENT_WIDTH=22
+    RENDER_RULE_WIDTH=$RENDER_CONTENT_WIDTH
+    RENDER_LEFT_WIDTH=$(( RENDER_CONTENT_WIDTH * 32 / 100 ))
+    (( RENDER_LEFT_WIDTH < 24 )) && RENDER_LEFT_WIDTH=24
+    (( RENDER_LEFT_WIDTH > 34 )) && RENDER_LEFT_WIDTH=34
+    RENDER_RIGHT_WIDTH=$(( RENDER_CONTENT_WIDTH - RENDER_LEFT_WIDTH - divider_visible_width ))
+    if (( RENDER_RIGHT_WIDTH < 28 )); then
+        RENDER_RIGHT_WIDTH=28
+        RENDER_LEFT_WIDTH=$(( RENDER_CONTENT_WIDTH - RENDER_RIGHT_WIDTH - divider_visible_width ))
+    fi
+
+    available_rows=$(( term_lines - 16 ))
+    (( available_rows < 8 )) && available_rows=8
+
+    RENDER_SESSION_ROWS=$(( available_rows - 9 ))
+    (( RENDER_SESSION_ROWS < 3 )) && RENDER_SESSION_ROWS=3
+    if (( TOTAL_SESSIONS > 0 && RENDER_SESSION_ROWS > TOTAL_SESSIONS )); then
+        RENDER_SESSION_ROWS=$TOTAL_SESSIONS
+    fi
+
+    RENDER_PICKER_ROWS=$(( available_rows - 4 ))
+    (( RENDER_PICKER_ROWS < 5 )) && RENDER_PICKER_ROWS=5
+
+    render_header
+    render_left_pane
+    render_right_pane
+
+    mapfile -t left_lines < <(printf "%b" "$LEFT_PANE_OUTPUT")
+    mapfile -t right_lines < <(printf "%b" "$RIGHT_PANE_OUTPUT")
+
+    if (( ${#left_lines[@]} > max_lines )); then
+        max_lines=${#left_lines[@]}
+    fi
+    if (( ${#right_lines[@]} > max_lines )); then
+        max_lines=${#right_lines[@]}
+    fi
+
+    for (( i = 0; i < max_lines; i++ )); do
+        left_line="${left_lines[$i]}"
+        right_line="${right_lines[$i]}"
+        [[ -z "${left_line+x}" ]] && left_line=""
+        [[ -z "${right_line+x}" ]] && right_line=""
+        append_render "$(pad_visible_line "$left_line" "$RENDER_LEFT_WIDTH")${divider}${right_line}\n"
+    done
+
     if [[ -n "$STATUS_MSG" ]]; then
-        output+="\n  ${STATUS_COLOR}${STATUS_MSG}${RESET}\n"
+        append_render "\n  ${STATUS_COLOR}${STATUS_MSG}${RESET}\n"
     fi
 
-    # Render all at once
-    printf "\033[2J\033[H%b" "$output"
+    printf "\033[2J\033[H%b" "$RENDER_OUTPUT"
     printf "\n  > "
 }
 
@@ -821,6 +1117,73 @@ handle_new_folder() {
     create_folder "$root_dir"
 }
 
+confirm_command_key() {
+    local cmd_key="$1"
+    printf "%s" "$cmd_key"
+    while true; do
+        IFS= read -rsn1 ch
+        if [[ "$ch" == '' ]]; then
+            return 0
+        fi
+        if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
+            printf "\b \b"
+            skip_reload=1
+            return 1
+        fi
+        if [[ "$ch" == $'\e' ]]; then
+            handle_escape_in_confirm "$cmd_key"
+            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then
+                return 1
+            fi
+        fi
+    done
+}
+
+dispatch_command_key() {
+    local key="$1"
+    case "$key" in
+        S) handle_scratchpad ;;
+        N) handle_new_folder ;;
+        R) handle_rename ;;
+        Q)
+            echo ""
+            exit 0
+            ;;
+    esac
+}
+
+handle_main_escape() {
+    local seq1
+    local seq2
+
+    IFS= read -rsn1 -t 0.2 seq1
+    if [[ "$seq1" == '[' ]]; then
+        IFS= read -rsn1 -t 0.2 seq2
+        case "$seq2" in
+            A)
+                move_picker_selection -1
+                return 0
+                ;;
+            B)
+                move_picker_selection 1
+                return 0
+                ;;
+            C|D)
+                toggle_mode
+                return 0
+                ;;
+            *)
+                while IFS= read -rsn1 -t 0.05 _discard; do :; done
+                return 0
+                ;;
+        esac
+    fi
+
+    while IFS= read -rsn1 -t 0.05 _discard; do :; done
+    clear_picker_filter
+    return 0
+}
+
 # ── Main Loop ────────────────────────────────────────────────────────────────
 
 skip_reload=0
@@ -831,16 +1194,8 @@ while true; do
     if [[ "$skip_reload" -eq 1 ]]; then
         skip_reload=0
     else
-        load_sessions
-
-        if [[ "$CURRENT_MODE" == "projects" ]]; then
-            load_items "$PROJECTS_DIR"
-        else
-            load_items "$SERVICES_DIR"
-        fi
+        refresh_screen_data
     fi
-
-    filter_picker_items "$FILTER_BUFFER"
 
     draw_screen
 
@@ -852,43 +1207,17 @@ while true; do
         IFS= read -rsn1 key
     fi
 
-    # Check for escape sequence (arrow keys, mouse clicks, focus events)
     if [[ "$key" == $'\e' ]]; then
-        IFS= read -rsn1 -t 0.2 seq1
-        if [[ "$seq1" == '[' ]]; then
-            IFS= read -rsn1 -t 0.2 seq2
-            case "$seq2" in
-                C)  # Right arrow
-                    CURRENT_MODE=$([[ "$CURRENT_MODE" == "projects" ]] && echo "services" || echo "projects")
-                    FILTER_BUFFER=""
-                    FILTERED_INDICES=()
-                    continue
-                    ;;
-                D)  # Left arrow
-                    CURRENT_MODE=$([[ "$CURRENT_MODE" == "projects" ]] && echo "services" || echo "projects")
-                    FILTER_BUFFER=""
-                    FILTERED_INDICES=()
-                    continue
-                    ;;
-                *)
-                    # Unknown escape sequence -- consume any remaining bytes and discard
-                    while IFS= read -rsn1 -t 0.05 _discard; do :; done
-                    continue
-                    ;;
-            esac
-        else
-            # Not a CSI sequence -- consume remaining and discard
-            while IFS= read -rsn1 -t 0.05 _discard; do :; done
-            if [[ -n "$FILTER_BUFFER" ]]; then
-                FILTER_BUFFER=""
-                FILTERED_INDICES=()
-            fi
-            continue
-        fi
+        handle_main_escape
+        continue
     fi
 
     case "$key" in
         [0-9])
+            if [[ -n "$FILTER_BUFFER" ]]; then
+                append_picker_filter "$key"
+                continue
+            fi
             # Show the digit, read more digits until Enter
             input="$key"
             printf "%s" "$key"
@@ -936,99 +1265,33 @@ while true; do
             continue
             ;;
         [a-z])
-            FILTER_BUFFER+="$key"
-            filter_picker_items "$FILTER_BUFFER"
+            append_picker_filter "$key"
             continue
             ;;
         $'\x7f'|$'\b')
-            if [[ -n "$FILTER_BUFFER" ]]; then
-                FILTER_BUFFER="${FILTER_BUFFER%?}"
-                filter_picker_items "$FILTER_BUFFER"
-            fi
+            backspace_picker_filter
             continue
             ;;
         '')
-            filter_picker_items "$FILTER_BUFFER"
-            if (( ${#FILTERED_INDICES[@]} > 0 )); then
-                launch_from_picker "${FILTERED_INDICES[0]}"
-            fi
+            launch_selected_picker_item
             ;;
         [A-Z])
-            # Uppercase versions of commands
-            case "$key" in
-                S)
-                    printf "%s" "$key"
-                    while true; do
-                        IFS= read -rsn1 ch
-                        if [[ "$ch" == '' ]]; then break; fi
-                        if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
-                            printf "\b \b"
-                            skip_reload=1
-                            continue 2
-                        fi
-                        if [[ "$ch" == $'\e' ]]; then
-                            handle_escape_in_confirm "$key"
-                            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then continue 2; fi
-                        fi
-                    done
-                    handle_scratchpad
-                    ;;
-                N)
-                    printf "%s" "$key"
-                    while true; do
-                        IFS= read -rsn1 ch
-                        if [[ "$ch" == '' ]]; then break; fi
-                        if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
-                            printf "\b \b"
-                            skip_reload=1
-                            continue 2
-                        fi
-                        if [[ "$ch" == $'\e' ]]; then
-                            handle_escape_in_confirm "$key"
-                            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then continue 2; fi
-                        fi
-                    done
-                    handle_new_folder
-                    ;;
-                R)
-                    printf "%s" "$key"
-                    while true; do
-                        IFS= read -rsn1 ch
-                        if [[ "$ch" == '' ]]; then break; fi
-                        if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
-                            printf "\b \b"
-                            skip_reload=1
-                            continue 2
-                        fi
-                        if [[ "$ch" == $'\e' ]]; then
-                            handle_escape_in_confirm "$key"
-                            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then continue 2; fi
-                        fi
-                    done
-                    handle_rename
-                    ;;
-                Q)
-                    printf "%s" "$key"
-                    while true; do
-                        IFS= read -rsn1 ch
-                        if [[ "$ch" == '' ]]; then break; fi
-                        if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
-                            printf "\b \b"
-                            skip_reload=1
-                            continue 2
-                        fi
-                        if [[ "$ch" == $'\e' ]]; then
-                            handle_escape_in_confirm "$key"
-                            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then continue 2; fi
-                        fi
-                    done
-                    echo ""
-                    exit 0
-                    ;;
-            esac
+            if [[ -n "$FILTER_BUFFER" && ! "$key" =~ ^[SNRQ]$ ]]; then
+                append_picker_filter "$key"
+                continue
+            fi
+            if [[ "$key" =~ ^[SNRQ]$ ]]; then
+                if confirm_command_key "$key"; then
+                    dispatch_command_key "$key"
+                fi
+            else
+                append_picker_filter "$key"
+            fi
             ;;
         *)
-            # Ignore unknown keys
+            if is_filterable_key "$key"; then
+                append_picker_filter "$key"
+            fi
             ;;
     esac
 done
