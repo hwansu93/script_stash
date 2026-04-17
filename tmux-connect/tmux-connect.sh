@@ -46,6 +46,8 @@ TOTAL_SESSIONS=0
 # Picker arrays
 AVAILABLE_ITEMS=()
 TOTAL_PICKER_ITEMS=0
+FILTER_BUFFER=""
+FILTERED_INDICES=()
 
 # ── Guard: already inside tmux ───────────────────────────────────────────────
 
@@ -193,11 +195,13 @@ handle_escape_in_confirm() {
                 else
                     CURRENT_MODE="projects"
                 fi
+                FILTER_BUFFER=""
                 if [[ "$CURRENT_MODE" == "projects" ]]; then
                     load_items "$PROJECTS_DIR"
                 else
                     load_items "$SERVICES_DIR"
                 fi
+                filter_picker_items "$FILTER_BUFFER"
                 draw_screen
                 printf "%s" "$cmd_key"
                 ESCAPE_RESULT="continue"
@@ -253,6 +257,27 @@ read_input_with_cancel() {
             # Regular character
             input="${input}${ch}"
             printf "%s" "$ch"
+        fi
+    done
+}
+
+filter_picker_items() {
+    local filter_str="$1"
+    local lowered_filter="${filter_str,,}"
+    local i
+    local item_name
+    local lowered_name
+
+    FILTERED_INDICES=()
+    for (( i = 0; i < TOTAL_PICKER_ITEMS; i++ )); do
+        item_name="${AVAILABLE_ITEMS[$i]}"
+        if [[ -z "$lowered_filter" ]]; then
+            FILTERED_INDICES+=("$i")
+        else
+            lowered_name="${item_name,,}"
+            if [[ "$lowered_name" == *"$lowered_filter"* ]]; then
+                FILTERED_INDICES+=("$i")
+            fi
         fi
     done
 }
@@ -363,6 +388,13 @@ draw_screen() {
     output+="  $(printf '%0.s─' $(seq 1 38))\n"
 
     # Picker items
+    local active_filter_display="${FILTER_BUFFER:-}"
+    if [[ -z "$active_filter_display" ]]; then
+        active_filter_display="(none)"
+    fi
+    output+="  ${DIM}Filter:${RESET} ${BOLD}${WHITE}${active_filter_display}${RESET}\n"
+
+    local visible_picker_count=${#FILTERED_INDICES[@]}
     if [ "$TOTAL_PICKER_ITEMS" -eq 0 ]; then
         local label
         if [[ "$CURRENT_MODE" == "projects" ]]; then
@@ -371,6 +403,8 @@ draw_screen() {
             label="services"
         fi
         output+="   ${DIM}(no available ${label})${RESET}\n"
+    elif [ "$visible_picker_count" -eq 0 ]; then
+        output+="   ${DIM}(no matches)${RESET}\n"
     else
         local picker_color
         if [[ "$CURRENT_MODE" == "projects" ]]; then
@@ -381,17 +415,17 @@ draw_screen() {
 
         # Compute tight column width based on longest item name
         local max_len=0
-        for item in "${AVAILABLE_ITEMS[@]}"; do
+        local idx
+        for idx in "${FILTERED_INDICES[@]}"; do
+            local item="${AVAILABLE_ITEMS[$idx]}"
             (( ${#item} > max_len )) && max_len=${#item}
         done
-        local col_width=$(( max_len + 5 ))  # "a. " = 3 chars + 2 padding
+        local col_width=$(( max_len + 2 ))
 
         local -a picker_labels=()
-        for (( i = 0; i < TOTAL_PICKER_ITEMS; i++ )); do
-            local letter
-            letter=$(printf "\\$(printf '%03o' $((97 + i)))")
-            local name="${AVAILABLE_ITEMS[$i]}"
-            picker_labels+=("$(printf "${BOLD}%s.${RESET} ${picker_color}%s${RESET}" "$letter" "$name")")
+        for idx in "${FILTERED_INDICES[@]}"; do
+            local name="${AVAILABLE_ITEMS[$idx]}"
+            picker_labels+=("$(printf "${picker_color}%s${RESET}" "$name")")
         done
 
         # Dynamic columns with max 5 rows each, column-major fill
@@ -427,8 +461,7 @@ draw_screen() {
 
     # Footer
     output+="\n"
-    output+="  ${DIM}←/→ toggle  |  # + Enter = session  a-z + Enter = open${RESET}\n"
-    output+="  ${DIM}[S] Scratchpad  [N] New  [R] Rename  [Q] Quit${RESET}\n"
+    output+="  ${DIM}type to filter • Enter pick • Bksp del • Esc clear • ←→ toggle • 1-9 session • S/N/R/Q cmd${RESET}\n"
 
     # Status message
     if [[ -n "$STATUS_MSG" ]]; then
@@ -807,6 +840,8 @@ while true; do
         fi
     fi
 
+    filter_picker_items "$FILTER_BUFFER"
+
     draw_screen
 
     # Read first character (or consume a pushed-back key)
@@ -825,10 +860,14 @@ while true; do
             case "$seq2" in
                 C)  # Right arrow
                     CURRENT_MODE=$([[ "$CURRENT_MODE" == "projects" ]] && echo "services" || echo "projects")
+                    FILTER_BUFFER=""
+                    FILTERED_INDICES=()
                     continue
                     ;;
                 D)  # Left arrow
                     CURRENT_MODE=$([[ "$CURRENT_MODE" == "projects" ]] && echo "services" || echo "projects")
+                    FILTER_BUFFER=""
+                    FILTERED_INDICES=()
                     continue
                     ;;
                 *)
@@ -840,6 +879,10 @@ while true; do
         else
             # Not a CSI sequence -- consume remaining and discard
             while IFS= read -rsn1 -t 0.05 _discard; do :; done
+            if [[ -n "$FILTER_BUFFER" ]]; then
+                FILTER_BUFFER=""
+                FILTERED_INDICES=()
+            fi
             continue
         fi
     fi
@@ -893,55 +936,22 @@ while true; do
             continue
             ;;
         [a-z])
-            # Letters: all are picker selections
-            case "$key" in
-                *)
-                    # Picker letter selection
-                    printf "%s" "$key"
-                    letter="$key"
-                    letter_cancelled=0
-                    while true; do
-                        IFS= read -rsn1 ch
-                        if [[ "$ch" == '' ]]; then  # Enter
-                            if [[ -n "$letter" ]]; then break; fi
-                            # Empty letter on Enter — stay in inner loop, no redraw needed
-                        elif [[ "$ch" == $'\e' ]]; then
-                            handle_escape_in_confirm "$letter"
-                            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then
-                                letter_cancelled=1
-                                break
-                            fi
-                        elif [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then  # Backspace
-                            if [[ -n "$letter" ]]; then
-                                letter=""
-                                printf "\b \b"
-                            fi
-                            # If letter is already empty, stay in inner loop (no redraw needed)
-                        elif [[ -z "$letter" && "$ch" =~ [a-z] ]]; then
-                            letter="$ch"
-                            printf "%s" "$ch"
-                        elif [[ -z "$letter" && "$ch" =~ [A-Z] ]]; then
-                            pushback_key="$ch"
-                            letter_cancelled=1
-                            break
-                        fi
-                    done
-
-                    if [[ "$letter_cancelled" -eq 1 ]]; then
-                        continue 2
-                    fi
-
-                    # Convert letter to picker index: a=0, b=1, ...
-                    idx=$(( $(printf '%d' "'$letter") - 97 ))
-                    if (( idx >= 0 && idx < TOTAL_PICKER_ITEMS )); then
-                        launch_from_picker "$idx"
-                    else
-                        STATUS_MSG="Invalid selection"
-                        STATUS_COLOR="$RED"
-                    fi
-                    continue
-                    ;;
-            esac
+            FILTER_BUFFER+="$key"
+            filter_picker_items "$FILTER_BUFFER"
+            continue
+            ;;
+        $'\x7f'|$'\b')
+            if [[ -n "$FILTER_BUFFER" ]]; then
+                FILTER_BUFFER="${FILTER_BUFFER%?}"
+                filter_picker_items "$FILTER_BUFFER"
+            fi
+            continue
+            ;;
+        '')
+            filter_picker_items "$FILTER_BUFFER"
+            if (( ${#FILTERED_INDICES[@]} > 0 )); then
+                launch_from_picker "${FILTERED_INDICES[0]}"
+            fi
             ;;
         [A-Z])
             # Uppercase versions of commands
