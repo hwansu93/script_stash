@@ -2,12 +2,13 @@
 
 # ── tmux-connect.sh ──────────────────────────────────────────────────────────
 # Startup launcher for SSH sessions on the NUC.
-# Manages tmux sessions scoped to project and service folders.
-# Single-screen UX: sessions always visible, toggle picker for projects/services.
+# Manages tmux sessions scoped to project, service, and business tool folders.
+# Single-screen UX: sessions always visible with searchable launch views.
 # ─────────────────────────────────────────────────────────────────────────────
 
 PROJECTS_DIR="/mnt/data/projects"
 SERVICES_DIR="/mnt/data/services"
+BUSINESSES_DIR="/mnt/data/businesses"
 SCRATCH_DIR="/mnt/data/scratch"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
@@ -34,7 +35,13 @@ EXCLUDE_DIRS=(
 CURRENT_MODE="projects"
 STATUS_MSG=""
 STATUS_COLOR=""
+MODE_ORDER=("projects" "services" "businesses" "all")
 declare -A SESSION_DIRS
+declare -A USED_DIRS
+declare -A MODE_TOTALS
+MODE_TOTALS_DIRTY=1
+LAST_MODE_TOTALS_USED_SIGNATURE=""
+CURRENT_USED_DIRS_SIGNATURE=""
 
 # Session arrays
 ALL_DISPLAY_NAMES=()
@@ -45,6 +52,9 @@ TOTAL_SESSIONS=0
 
 # Picker arrays
 AVAILABLE_ITEMS=()
+AVAILABLE_ITEM_PATHS=()
+AVAILABLE_ITEM_TYPES=()
+AVAILABLE_ITEM_DEFAULTS=()
 TOTAL_PICKER_ITEMS=0
 FILTER_BUFFER=""
 FILTERED_INDICES=()
@@ -52,6 +62,19 @@ FILTERED_MATCH_COUNT=0
 SELECTED_PICKER_POS=0
 PICKER_SCROLL_OFFSET=0
 LAST_PICKER_ROWS=0
+
+resolve_script_dir() {
+    local source="${BASH_SOURCE[0]}"
+    local dir=""
+
+    while [ -L "$source" ]; do
+        dir="$(cd -P "$(dirname "$source")" && pwd)"
+        source="$(readlink "$source")"
+        [[ "$source" != /* ]] && source="$dir/$source"
+    done
+
+    cd -P "$(dirname "$source")" && pwd
+}
 
 # ── Guard: already inside tmux ───────────────────────────────────────────────
 
@@ -67,22 +90,26 @@ if [ ! -d "$PROJECTS_DIR" ]; then
     exit 1
 fi
 
-# Create services dir if it doesn't exist
+# Create launch roots if they don't exist
 mkdir -p "$SERVICES_DIR"
+mkdir -p "$BUSINESSES_DIR"
 mkdir -p "$SCRATCH_DIR"
 
 # Ensure ai-session wrapper is available on PATH
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(resolve_script_dir)"
 export PATH="$SCRIPT_DIR:$PATH"
+AI_SESSION_BIN="$SCRIPT_DIR/ai-session"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 load_sessions() {
     local proj_names=()
     local svc_names=()
+    local biz_names=()
     local scratch_names=()
     local -A session_attached
     local -A session_tools
+    local -A session_types
     ALL_DISPLAY_NAMES=()
     ALL_DISPLAY_TYPES=()
     ALL_DISPLAY_ATTACHED=()
@@ -100,79 +127,385 @@ load_sessions() {
         session_attached["$sname"]="$attached"
 
         local pdir
+        local source_dir
+        local session_kind
         pdir=$(tmux show-environment -t "$sname" PROJECT_DIR 2>/dev/null | grep -v '^-' | cut -d= -f2)
+        source_dir=$(tmux show-environment -t "$sname" SOURCE_DIR 2>/dev/null | grep -v '^-' | cut -d= -f2)
+        session_kind=$(tmux show-environment -t "$sname" SESSION_KIND 2>/dev/null | grep -v '^-' | cut -d= -f2)
 
-        if [ -n "$pdir" ]; then
+        if [ -n "$source_dir" ]; then
+            SESSION_DIRS["$sname"]="$source_dir"
+        elif [ -n "$pdir" ]; then
             SESSION_DIRS["$sname"]="$pdir"
         fi
 
         local tool_val
         tool_val=$(tmux show-environment -t "$sname" TOOL 2>/dev/null | grep -v '^-' | cut -d= -f2)
-        session_tools["$sname"]="${tool_val:-claude}"
+        session_tools["$sname"]="${tool_val:-codex}"
+
+        if [ -n "$session_kind" ]; then
+            session_types["$sname"]="$session_kind"
+        elif [[ "$source_dir" == "$BUSINESSES_DIR"/* || "$pdir" == "$BUSINESSES_DIR"/* ]]; then
+            session_types["$sname"]="business"
+        elif [[ "$source_dir" == "$SERVICES_DIR"/* || "$pdir" == "$SERVICES_DIR"/* ]]; then
+            session_types["$sname"]="service"
+        elif [[ "$sname" == scratchpad* ]]; then
+            session_types["$sname"]="scratchpad"
+        else
+            session_types["$sname"]="project"
+        fi
 
         if [[ "$sname" == scratchpad* ]]; then
             scratch_names+=("$sname")
-        elif [[ "$pdir" == "$SERVICES_DIR"* ]]; then
+        elif [[ "${session_types[$sname]}" == "business" ]]; then
+            biz_names+=("$sname")
+        elif [[ "${session_types[$sname]}" == "service" ]]; then
             svc_names+=("$sname")
         else
             proj_names+=("$sname")
         fi
     done < <(tmux ls -F '#{session_created}:#{session_name}:#{session_attached}' 2>/dev/null | sort -n -t: -k1,1 | cut -d: -f2-)
 
-    # Build display arrays: projects first, then services, then scratchpads
+    # Build display arrays: projects first, then businesses, then services, then scratchpads
     for name in "${proj_names[@]}"; do
-        ALL_DISPLAY_NAMES+=("$name")
-        ALL_DISPLAY_TYPES+=("project")
-        ALL_DISPLAY_ATTACHED+=("${session_attached[$name]}")
-        ALL_DISPLAY_TOOLS+=("${session_tools[$name]}")
+        append_session_display \
+            "$name" \
+            "${session_types[$name]}" \
+            "${session_attached[$name]}" \
+            "${session_tools[$name]}"
+    done
+    for name in "${biz_names[@]}"; do
+        append_session_display \
+            "$name" \
+            "${session_types[$name]}" \
+            "${session_attached[$name]}" \
+            "${session_tools[$name]}"
     done
     for name in "${svc_names[@]}"; do
-        ALL_DISPLAY_NAMES+=("$name")
-        ALL_DISPLAY_TYPES+=("service")
-        ALL_DISPLAY_ATTACHED+=("${session_attached[$name]}")
-        ALL_DISPLAY_TOOLS+=("${session_tools[$name]}")
+        append_session_display \
+            "$name" \
+            "${session_types[$name]}" \
+            "${session_attached[$name]}" \
+            "${session_tools[$name]}"
     done
     for name in "${scratch_names[@]}"; do
-        ALL_DISPLAY_NAMES+=("$name")
-        ALL_DISPLAY_TYPES+=("scratchpad")
-        ALL_DISPLAY_ATTACHED+=("${session_attached[$name]}")
-        ALL_DISPLAY_TOOLS+=("${session_tools[$name]}")
+        append_session_display \
+            "$name" \
+            "${session_types[$name]}" \
+            "${session_attached[$name]}" \
+            "${session_tools[$name]}"
     done
 
     TOTAL_SESSIONS=${#ALL_DISPLAY_NAMES[@]}
 }
 
-load_items() {
-    local root_dir="$1"
-    AVAILABLE_ITEMS=()
+append_session_display() {
+    local session_name="$1"
+    local session_type="$2"
+    local attached="$3"
+    local tool="$4"
 
-    if [ ! -d "$root_dir" ]; then
-        TOTAL_PICKER_ITEMS=0
+    ALL_DISPLAY_NAMES+=("$session_name")
+    ALL_DISPLAY_TYPES+=("$session_type")
+    ALL_DISPLAY_ATTACHED+=("$attached")
+    ALL_DISPLAY_TOOLS+=("$tool")
+}
+
+array_signature() {
+    if (( $# == 0 )); then
+        echo "0:0"
         return
     fi
 
-    local -A used_dirs
+    printf '%s\n' "$@" | sort -u | cksum | awk '{print $1 ":" $2}'
+}
+
+path_has_hidden_segment() {
+    local rel_path="$1"
+    local segment
+
+    IFS='/' read -r -a segments <<< "$rel_path"
+    for segment in "${segments[@]}"; do
+        [[ -n "$segment" && "$segment" == .* ]] && return 0
+    done
+
+    return 1
+}
+
+load_used_dirs() {
+    USED_DIRS=()
+    local sname
+    local pdir
+    local used_paths=()
+
     for sname in "${ALL_DISPLAY_NAMES[@]}"; do
-        local pdir="${SESSION_DIRS[$sname]:-}"
+        pdir="${SESSION_DIRS[$sname]:-}"
         if [ -n "$pdir" ]; then
-            used_dirs["$pdir"]=1
+            USED_DIRS["$pdir"]=1
+            used_paths+=("$pdir")
         fi
     done
+
+    CURRENT_USED_DIRS_SIGNATURE="$(array_signature "${used_paths[@]}")"
+}
+
+count_available_directories() {
+    local root_dir="$1"
+    local min_depth="$2"
+    local max_depth="$3"
+    local count=0
+    local full_path
+    local find_excludes=()
+    local ex
+
+    [ -d "$root_dir" ] || { echo 0; return; }
+
+    for ex in "${EXCLUDE_DIRS[@]}"; do
+        find_excludes+=(-not -name "$ex")
+    done
+
+    while IFS= read -r full_path; do
+        [ -z "$full_path" ] && continue
+        local rel_path="${full_path#"$root_dir"/}"
+        if path_has_hidden_segment "$rel_path"; then
+            continue
+        fi
+        if [ -z "${USED_DIRS[$full_path]+_}" ]; then
+            count=$(( count + 1 ))
+        fi
+    done < <(find "$root_dir" -mindepth "$min_depth" -maxdepth "$max_depth" -type d "${find_excludes[@]}" -printf '%p\n' | sort -f)
+
+    echo "$count"
+}
+
+load_mode_totals() {
+    MODE_TOTALS=()
+    MODE_TOTALS[projects]="$(count_available_directories "$PROJECTS_DIR" 1 1)"
+    MODE_TOTALS[services]="$(count_available_directories "$SERVICES_DIR" 1 1)"
+    MODE_TOTALS[businesses]="$(count_available_directories "$BUSINESSES_DIR" 2 2)"
+    MODE_TOTALS[all]=$(( ${MODE_TOTALS[projects]:-0} + ${MODE_TOTALS[services]:-0} + ${MODE_TOTALS[businesses]:-0} ))
+    LAST_MODE_TOTALS_USED_SIGNATURE="$CURRENT_USED_DIRS_SIGNATURE"
+    MODE_TOTALS_DIRTY=0
+}
+
+session_name_default_from_path() {
+    local path="$1"
+    path="${path//\//-}"
+    path="${path// /-}"
+    echo "$path"
+}
+
+clear_inline_prompt_block() {
+    local lines="$1"
+    local i
+
+    if (( lines <= 0 )); then
+        return
+    fi
+
+    printf '\r'
+    for (( i = 0; i < lines; i++ )); do
+        printf '\033[2K'
+        if (( i < lines - 1 )); then
+            printf '\033[1A'
+        fi
+    done
+    printf '\r'
+}
+
+prompt_business_name() {
+    local -a businesses=()
+    local business
+    local i
+    local key
+    local seq1
+    local seq2
+    local selected_idx=0
+    local rendered_lines=0
+
+    if [[ -d "$BUSINESSES_DIR" ]]; then
+        while IFS= read -r business; do
+            [ -z "$business" ] && continue
+            if path_has_hidden_segment "$business"; then
+                continue
+            fi
+            businesses+=("$business")
+        done < <(find "$BUSINESSES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -f)
+    fi
+
+    if (( ${#businesses[@]} == 0 )); then
+        echo ""
+        read_input_with_cancel "  New business name: "
+        if [[ $? -ne 0 ]]; then
+            return 1
+        fi
+        REPLY="$(echo "$REPLY" | xargs)"
+        return 0
+    fi
+
+    while true; do
+        if (( rendered_lines > 0 )); then
+            clear_inline_prompt_block "$rendered_lines"
+        else
+            printf "\n"
+        fi
+
+        printf "  Businesses (Up/Down select, Enter confirm, n = new, Esc cancel):\n"
+        for (( i = 0; i < ${#businesses[@]}; i++ )); do
+            if (( i == selected_idx )); then
+                printf "    %b %b\n" "${BOLD}${WHITE}>${RESET}" "${BOLD}${BLUE}${businesses[$i]}${RESET}"
+            else
+                printf "      %s\n" "${businesses[$i]}"
+            fi
+        done
+        printf "  > "
+        rendered_lines=$(( ${#businesses[@]} + 2 ))
+
+        IFS= read -rsn1 key
+        case "$key" in
+            '')
+                clear_inline_prompt_block "$rendered_lines"
+                REPLY="${businesses[$selected_idx]}"
+                return 0
+                ;;
+            n|N)
+                clear_inline_prompt_block "$rendered_lines"
+                rendered_lines=0
+                echo ""
+                read_input_with_cancel "  New business name: "
+                if [[ $? -ne 0 ]]; then
+                    continue
+                fi
+                REPLY="$(echo "$REPLY" | xargs)"
+                return 0
+                ;;
+            $'\e')
+                IFS= read -rsn1 -t 0.2 seq1
+                if [[ -z "$seq1" ]]; then
+                    clear_inline_prompt_block "$rendered_lines"
+                    return 1
+                fi
+                if [[ "$seq1" == '[' ]]; then
+                    IFS= read -rsn1 -t 0.2 seq2
+                    case "$seq2" in
+                        A)
+                            if (( selected_idx > 0 )); then
+                                selected_idx=$(( selected_idx - 1 ))
+                            fi
+                            ;;
+                        B)
+                            if (( selected_idx < ${#businesses[@]} - 1 )); then
+                                selected_idx=$(( selected_idx + 1 ))
+                            fi
+                            ;;
+                    esac
+                fi
+                ;;
+        esac
+    done
+}
+
+add_picker_item() {
+    local label="$1"
+    local full_path="$2"
+    local item_type="$3"
+    local default_name="${4:-$(session_name_default_from_path "$label")}"
+    local hidden_check_path="$label"
+
+    [ -d "$full_path" ] || return
+
+    if path_has_hidden_segment "$hidden_check_path"; then
+        return
+    fi
+
+    if [ -z "${USED_DIRS[$full_path]+_}" ]; then
+        AVAILABLE_ITEMS+=("$label")
+        AVAILABLE_ITEM_PATHS+=("$full_path")
+        AVAILABLE_ITEM_TYPES+=("$item_type")
+        AVAILABLE_ITEM_DEFAULTS+=("$default_name")
+    fi
+}
+
+load_items() {
+    AVAILABLE_ITEMS=()
+    AVAILABLE_ITEM_PATHS=()
+    AVAILABLE_ITEM_TYPES=()
+    AVAILABLE_ITEM_DEFAULTS=()
 
     local find_excludes=()
     for ex in "${EXCLUDE_DIRS[@]}"; do
         find_excludes+=(-not -name "$ex")
     done
 
-    while IFS= read -r folder; do
-        [ -z "$folder" ] && continue
-        local full_path="$root_dir/$folder"
-        if [ -z "${used_dirs[$full_path]+_}" ]; then
-            AVAILABLE_ITEMS+=("$folder")
-        fi
-    done < <(find "$root_dir" -mindepth 1 -maxdepth 1 -type d "${find_excludes[@]}" -printf '%f\n' | sort -f)
+    local folder
+    local rel_path
+    local label
+
+    case "$CURRENT_MODE" in
+        projects)
+            if [ -d "$PROJECTS_DIR" ]; then
+                while IFS= read -r folder; do
+                    [ -z "$folder" ] && continue
+                    add_picker_item "$folder" "$PROJECTS_DIR/$folder" "project" "$folder"
+                done < <(find "$PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d "${find_excludes[@]}" -printf '%f\n' | sort -f)
+            fi
+            ;;
+        services)
+            if [ -d "$SERVICES_DIR" ]; then
+                while IFS= read -r folder; do
+                    [ -z "$folder" ] && continue
+                    add_picker_item "$folder" "$SERVICES_DIR/$folder" "service" "$folder"
+                done < <(find "$SERVICES_DIR" -mindepth 1 -maxdepth 1 -type d "${find_excludes[@]}" -printf '%f\n' | sort -f)
+            fi
+            ;;
+        businesses)
+            if [ -d "$BUSINESSES_DIR" ]; then
+                while IFS= read -r rel_path; do
+                    [ -z "$rel_path" ] && continue
+                    add_picker_item "$rel_path" "$BUSINESSES_DIR/$rel_path" "business" "$(session_name_default_from_path "$rel_path")"
+                done < <(find "$BUSINESSES_DIR" -mindepth 2 -maxdepth 2 -type d "${find_excludes[@]}" -printf '%P\n' | sort -f)
+            fi
+            ;;
+        all)
+            if [ -d "$PROJECTS_DIR" ]; then
+                while IFS= read -r folder; do
+                    [ -z "$folder" ] && continue
+                    add_picker_item "projects/$folder" "$PROJECTS_DIR/$folder" "project" "$folder"
+                done < <(find "$PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d "${find_excludes[@]}" -printf '%f\n' | sort -f)
+            fi
+            if [ -d "$SERVICES_DIR" ]; then
+                while IFS= read -r folder; do
+                    [ -z "$folder" ] && continue
+                    add_picker_item "services/$folder" "$SERVICES_DIR/$folder" "service" "$folder"
+                done < <(find "$SERVICES_DIR" -mindepth 1 -maxdepth 1 -type d "${find_excludes[@]}" -printf '%f\n' | sort -f)
+            fi
+            if [ -d "$BUSINESSES_DIR" ]; then
+                while IFS= read -r rel_path; do
+                    [ -z "$rel_path" ] && continue
+                    label="businesses/$rel_path"
+                    add_picker_item "$label" "$BUSINESSES_DIR/$rel_path" "business" "$(session_name_default_from_path "$rel_path")"
+                done < <(find "$BUSINESSES_DIR" -mindepth 2 -maxdepth 2 -type d "${find_excludes[@]}" -printf '%P\n' | sort -f)
+            fi
+            ;;
+    esac
 
     TOTAL_PICKER_ITEMS=${#AVAILABLE_ITEMS[@]}
+}
+
+tool_color() {
+    case "$1" in
+        gemini) echo "$BLUE" ;;
+        codex) echo "$CYAN" ;;
+        *) echo "$ORANGE" ;;
+    esac
+}
+
+tool_badge() {
+    case "$1" in
+        gemini) echo "gm" ;;
+        codex) echo "cx" ;;
+        *) echo "cl" ;;
+    esac
 }
 
 # Strip ANSI escape codes for width calculation
@@ -274,14 +607,6 @@ is_filterable_key() {
     [[ "$key" =~ ^[[:graph:]]$ ]]
 }
 
-current_root_dir() {
-    if [[ "$CURRENT_MODE" == "projects" ]]; then
-        echo "$PROJECTS_DIR"
-    else
-        echo "$SERVICES_DIR"
-    fi
-}
-
 reset_picker_selection() {
     SELECTED_PICKER_POS=0
     PICKER_SCROLL_OFFSET=0
@@ -356,22 +681,107 @@ clear_picker_filter() {
 
 set_mode() {
     local new_mode="$1"
+    if [[ "$CURRENT_MODE" != "$new_mode" ]]; then
+        MODE_TOTALS_DIRTY=1
+    fi
     CURRENT_MODE="$new_mode"
     reset_picker_selection
     set_picker_filter ""
 }
 
-toggle_mode() {
-    if [[ "$CURRENT_MODE" == "projects" ]]; then
-        set_mode "services"
-    else
-        set_mode "projects"
-    fi
+cycle_mode() {
+    local delta="$1"
+    local i
+    local current_index=0
+    local mode_count="${#MODE_ORDER[@]}"
+
+    for (( i = 0; i < mode_count; i++ )); do
+        if [[ "${MODE_ORDER[$i]}" == "$CURRENT_MODE" ]]; then
+            current_index="$i"
+            break
+        fi
+    done
+
+    local next_index=$(( (current_index + delta + mode_count) % mode_count ))
+    set_mode "${MODE_ORDER[$next_index]}"
+}
+
+mode_picker_color() {
+    case "$1" in
+        projects) echo "$GREEN" ;;
+        services) echo "$MAGENTA" ;;
+        businesses) echo "$BLUE" ;;
+        all) echo "$CYAN" ;;
+    esac
+}
+
+mode_item_label() {
+    case "$1" in
+        projects) echo "projects" ;;
+        services) echo "services" ;;
+        businesses) echo "business tools" ;;
+        all) echo "items" ;;
+    esac
+}
+
+mode_title() {
+    local mode="$1"
+    local count="${MODE_TOTALS[$mode]:-0}"
+    case "$mode" in
+        projects) echo "Projects ($count)" ;;
+        services) echo "Services ($count)" ;;
+        businesses) echo "Businesses ($count)" ;;
+        all) echo "All ($count)" ;;
+    esac
+}
+
+item_type_color() {
+    case "$1" in
+        project) echo "$GREEN" ;;
+        service) echo "$MAGENTA" ;;
+        business) echo "$BLUE" ;;
+        scratchpad) echo "$WHITE" ;;
+        *) echo "$CYAN" ;;
+    esac
+}
+
+item_type_badge() {
+    case "$1" in
+        project) echo "pr" ;;
+        service) echo "sv" ;;
+        business) echo "bz" ;;
+        scratchpad) echo "sp" ;;
+        *) echo "??" ;;
+    esac
+}
+
+render_mode_tabs() {
+    local mode
+    local color
+    local title
+    local output="  "
+
+    for mode in "${MODE_ORDER[@]}"; do
+        color=$(mode_picker_color "$mode")
+        title="$(mode_title "$mode")"
+
+        if [[ "$mode" == "$CURRENT_MODE" ]]; then
+            output+="${BOLD}${color}[${title}]${RESET}   "
+        else
+            output+="${DIM}${title}${RESET}   "
+        fi
+    done
+
+    printf '%s' "$output"
 }
 
 refresh_screen_data() {
     load_sessions
-    load_items "$(current_root_dir)"
+    load_used_dirs
+    if (( MODE_TOTALS_DIRTY == 1 )) || [[ "$CURRENT_USED_DIRS_SIGNATURE" != "$LAST_MODE_TOTALS_USED_SIGNATURE" ]]; then
+        load_mode_totals
+    fi
+    load_items
     filter_picker_items "$FILTER_BUFFER"
     sync_picker_selection
 }
@@ -396,8 +806,16 @@ handle_escape_in_confirm() {
     if [[ "$seq1" == '[' ]]; then
         IFS= read -rsn1 -t 0.2 seq2
         case "$seq2" in
-            C|D)
-                toggle_mode
+            C)
+                cycle_mode 1
+                refresh_screen_data
+                draw_screen
+                printf "%s" "$cmd_key"
+                ESCAPE_RESULT="continue"
+                return
+                ;;
+            D)
+                cycle_mode -1
                 refresh_screen_data
                 draw_screen
                 printf "%s" "$cmd_key"
@@ -528,22 +946,10 @@ pad_visible_line() {
 }
 
 render_header() {
-    local mode_badge
-    local subtitle
-
-    if [[ "$CURRENT_MODE" == "projects" ]]; then
-        mode_badge="${BOLD}${GREEN}[ Projects ]${RESET}"
-        subtitle="Browse launchable projects and active sessions"
-    else
-        mode_badge="${BOLD}${MAGENTA}[ Services ]${RESET}"
-        subtitle="Browse launchable services and active sessions"
-    fi
-
     append_render "\n"
     append_render "  ${BOLD}${CYAN}Tmux Connect${RESET}\n"
-    append_render "  ${mode_badge} ${DIM}${subtitle}${RESET}\n"
     append_render "  ${DIM}$(repeat_char "-" "$RENDER_RULE_WIDTH")${RESET}\n"
-    append_render "  ${DIM}Enter launch selected${RESET}   ${DIM}Up/Down move${RESET}   ${DIM}Left/Right switch mode${RESET}\n\n"
+    append_render "  ${DIM}Enter launch selected${RESET}   ${DIM}Up/Down move${RESET}   ${DIM}Left/Right switch mode${RESET}   ${DIM}Shift+S/N/R/Q actions${RESET}\n\n"
 }
 
 render_left_pane() {
@@ -558,6 +964,7 @@ render_left_pane() {
     local max_name_width
     local shown_name
     local tool
+    local badge
 
     LEFT_PANE_OUTPUT=""
 
@@ -574,11 +981,8 @@ render_left_pane() {
             num=$(( i + 1 ))
             name="${ALL_DISPLAY_NAMES[$i]}"
             tool="${ALL_DISPLAY_TOOLS[$i]}"
-            if [[ "$tool" == "gemini" ]]; then
-                color_code="$BLUE"
-            else
-                color_code="$ORANGE"
-            fi
+            color_code="$(tool_color "$tool")"
+            badge="$(tool_badge "$tool")"
 
             if [[ "${ALL_DISPLAY_ATTACHED[$i]}" == "1" ]]; then
                 attached_indicator="${BOLD}${color_code}*${RESET}"
@@ -586,11 +990,11 @@ render_left_pane() {
                 attached_indicator=" "
             fi
 
-            prefix_plain="${num}. * "
+            prefix_plain="${num}. * [${badge}] "
             max_name_width=$(( RENDER_LEFT_WIDTH - 6 - ${#prefix_plain} ))
             (( max_name_width < 8 )) && max_name_width=8
             shown_name=$(truncate_text "$name" "$max_name_width")
-            append_left_render "    ${BOLD}${num}.${RESET} ${attached_indicator} ${color_code}${shown_name}${RESET}\n"
+            append_left_render "    ${BOLD}${num}.${RESET} ${attached_indicator} ${color_code}[${badge}]${RESET} ${color_code}${shown_name}${RESET}\n"
             displayed_sessions=$(( displayed_sessions + 1 ))
         done
 
@@ -602,14 +1006,15 @@ render_left_pane() {
 
     append_left_render "\n"
     append_left_render "  ${BOLD}${WHITE}Actions${RESET}\n"
-    append_left_render "    ${DIM}[S] Scratchpad${RESET}\n"
-    append_left_render "    ${DIM}[N] New folder${RESET}\n"
-    append_left_render "    ${DIM}[R] Rename${RESET}\n"
-    append_left_render "    ${DIM}[Q] Quit${RESET}\n"
+    append_left_render "    ${DIM}[Shift+S] Scratchpad${RESET}\n"
+    append_left_render "    ${DIM}[Shift+N] New item${RESET}\n"
+    append_left_render "    ${DIM}[Shift+R] Rename${RESET}\n"
+    append_left_render "    ${DIM}[Shift+Q] Quit${RESET}\n"
     append_left_render "\n"
     append_left_render "  ${BOLD}${WHITE}Hints${RESET}\n"
-    append_left_render "    ${DIM}[1-9] Attach${RESET}\n"
+    append_left_render "    ${DIM}[number + Enter] Attach${RESET}\n"
     append_left_render "    ${DIM}Type to search${RESET}\n"
+    append_left_render "    ${DIM}Uppercase runs actions${RESET}\n"
     append_left_render "    ${DIM}Esc clears filter${RESET}\n"
 }
 
@@ -626,6 +1031,9 @@ render_right_pane() {
     local max_name_width
     local remaining_picker
     local label
+    local item_type
+    local item_color
+    local item_prefix
 
     RIGHT_PANE_OUTPUT=""
 
@@ -634,15 +1042,9 @@ render_right_pane() {
     fi
     active_filter_display=$(truncate_text "$active_filter_display" $(( RENDER_RIGHT_WIDTH - 22 )))
 
-    if [[ "$CURRENT_MODE" == "projects" ]]; then
-        append_right_render "  ${BOLD}${GREEN}[Projects]${RESET}   ${DIM}Services${RESET}\n"
-        picker_color="$GREEN"
-        label="projects"
-    else
-        append_right_render "  ${DIM}Projects${RESET}   ${BOLD}${MAGENTA}[Services]${RESET}\n"
-        picker_color="$MAGENTA"
-        label="services"
-    fi
+    append_right_render "$(render_mode_tabs)"$'\n'
+    picker_color="$(mode_picker_color "$CURRENT_MODE")"
+    label="$(mode_item_label "$CURRENT_MODE")"
     append_right_render "  ${DIM}$(repeat_char "-" "$RENDER_RIGHT_WIDTH")${RESET}\n"
 
     append_right_render "  ${BOLD}${WHITE}Available To Launch${RESET}\n"
@@ -671,21 +1073,36 @@ render_right_pane() {
         end_index=$FILTERED_MATCH_COUNT
     fi
 
-    name="${AVAILABLE_ITEMS[${FILTERED_INDICES[$SELECTED_PICKER_POS]}]}"
-    shown_name=$(truncate_text "$name" $(( RENDER_RIGHT_WIDTH - 14 )))
-    append_right_render "  ${DIM}Selected:${RESET} ${BOLD}${picker_color}${shown_name}${RESET}\n"
+    match_idx="${FILTERED_INDICES[$SELECTED_PICKER_POS]}"
+    name="${AVAILABLE_ITEMS[$match_idx]}"
+    item_type="${AVAILABLE_ITEM_TYPES[$match_idx]}"
+    item_color="$picker_color"
+    item_prefix=""
+    if [[ "$CURRENT_MODE" == "all" ]]; then
+        item_color="$(item_type_color "$item_type")"
+        item_prefix="[$(item_type_badge "$item_type")] "
+    fi
+    shown_name=$(truncate_text "${item_prefix}${name}" $(( RENDER_RIGHT_WIDTH - 14 )))
+    append_right_render "  ${DIM}Selected:${RESET} ${BOLD}${item_color}${shown_name}${RESET}\n"
 
     for (( display_pos = start_index; display_pos < end_index; display_pos++ )); do
         match_idx="${FILTERED_INDICES[$display_pos]}"
         name="${AVAILABLE_ITEMS[$match_idx]}"
+        item_type="${AVAILABLE_ITEM_TYPES[$match_idx]}"
+        item_color="$picker_color"
+        item_prefix=""
+        if [[ "$CURRENT_MODE" == "all" ]]; then
+            item_color="$(item_type_color "$item_type")"
+            item_prefix="[$(item_type_badge "$item_type")] "
+        fi
         if (( display_pos == SELECTED_PICKER_POS )); then
             max_name_width=$(( RENDER_RIGHT_WIDTH - 11 ))
-            shown_name=$(truncate_text "$name" "$max_name_width")
-            append_right_render "   ${BOLD}${WHITE}>${RESET} ${BOLD}${picker_color}${shown_name}${RESET} ${DIM}[enter]${RESET}\n"
+            shown_name=$(truncate_text "${item_prefix}${name}" "$max_name_width")
+            append_right_render "   ${BOLD}${WHITE}>${RESET} ${BOLD}${item_color}${shown_name}${RESET} ${DIM}[enter]${RESET}\n"
         else
             max_name_width=$(( RENDER_RIGHT_WIDTH - 7 ))
-            shown_name=$(truncate_text "$name" "$max_name_width")
-            append_right_render "     ${picker_color}${shown_name}${RESET}\n"
+            shown_name=$(truncate_text "${item_prefix}${name}" "$max_name_width")
+            append_right_render "     ${item_color}${shown_name}${RESET}\n"
         fi
     done
 
@@ -732,9 +1149,6 @@ draw_screen() {
 
     RENDER_SESSION_ROWS=$(( available_rows - 9 ))
     (( RENDER_SESSION_ROWS < 3 )) && RENDER_SESSION_ROWS=3
-    if (( TOTAL_SESSIONS > 0 && RENDER_SESSION_ROWS > TOTAL_SESSIONS )); then
-        RENDER_SESSION_ROWS=$TOTAL_SESSIONS
-    fi
 
     RENDER_PICKER_ROWS=$(( available_rows - 4 ))
     (( RENDER_PICKER_ROWS < 5 )) && RENDER_PICKER_ROWS=5
@@ -798,34 +1212,72 @@ prompt_session_name() {
 
 prompt_tool() {
     local full_path="$1"
+    local gemini_available=0
+    local prompt_suffix="c/l"
+    local tool_key
+    local seq1
 
-    # Skip tool choice for non-git projects — default to claude
-    if ! git -C "$full_path" rev-parse --git-dir &>/dev/null 2>&1; then
-        REPLY="claude"
-        return 0
+    if git -C "$full_path" rev-parse --git-dir >/dev/null 2>&1; then
+        gemini_available=1
+        prompt_suffix="c/l/g"
     fi
 
-    echo ""
-    printf "  Tool (c/g) [c]: "
-    IFS= read -rsn1 tool_key
-    echo ""
+    while true; do
+        echo ""
+        printf "  Tool (%s) [c, Esc cancel]: " "$prompt_suffix"
+        IFS= read -rsn1 tool_key
+        echo ""
 
-    case "$tool_key" in
-        g|G)
-            REPLY="gemini"
-            ;;
-        *)
-            REPLY="claude"
-            ;;
-    esac
+        case "$tool_key" in
+            l|L)
+                REPLY="claude"
+                return 0
+                ;;
+            g|G)
+                if (( gemini_available == 1 )); then
+                    REPLY="gemini"
+                    return 0
+                fi
+                echo "  Gemini worktrees require a git repo."
+                ;;
+            c|C|'')
+                REPLY="codex"
+                return 0
+                ;;
+            $'\e')
+                IFS= read -rsn1 -t 0.2 seq1
+                if [[ -z "$seq1" ]]; then
+                    return 1
+                fi
+                while IFS= read -rsn1 -t 0.05 _discard; do :; done
+                ;;
+            *)
+                echo "  Choose c, l$( (( gemini_available == 1 )) && printf ', or g' )."
+                ;;
+        esac
+    done
 }
 
 setup_worktree() {
     local project_dir="$1"
     local sname="$2"
-    local worktree_base="/mnt/data/projects/.worktrees"
-    local worktree_dir="$worktree_base/${sname}-gemini"
+    local worktree_base="/mnt/data/.worktrees"
+    local repo_slug
+    local repo_hash
+    local worktree_id
+    local worktree_dir
     local branch_name="gemini/$sname"
+
+    if ! git -C "$project_dir" rev-parse --show-toplevel >/dev/null 2>&1; then
+        echo "  ✗ Gemini worktrees require a git repo."
+        return 1
+    fi
+
+    repo_slug="$(basename "$project_dir")"
+    repo_slug="$(printf '%s' "$repo_slug" | tr -cs '[:alnum:]_-' '-')"
+    repo_hash="$(printf '%s' "$project_dir" | cksum | awk '{print $1}')"
+    worktree_id="${repo_slug}-${repo_hash}-$(session_name_default_from_path "$sname")"
+    worktree_dir="$worktree_base/${worktree_id}-gemini"
 
     # Create worktrees directory
     mkdir -p "$worktree_base"
@@ -867,11 +1319,12 @@ setup_worktree() {
 }
 
 launch_session() {
-    local folder="$1"
-    local root_dir="$2"
-    local full_path="$root_dir/$folder"
+    local item_label="$1"
+    local full_path="$2"
+    local item_type="${3:-project}"
+    local default_session_name="${4:-$item_label}"
 
-    prompt_session_name "$folder"
+    prompt_session_name "$default_session_name"
     if [[ $? -ne 0 ]]; then return 1; fi
     local sname="$REPLY"
 
@@ -882,35 +1335,93 @@ launch_session() {
     fi
 
     if tmux has-session -t "=$sname" 2>/dev/null; then
-        tmux attach -t "=$sname"
-        check_exit_after_attach "$sname"
-    else
-        prompt_tool "$full_path"
-        local tool="$REPLY"
-        local session_dir="$full_path"
-
-        if [[ "$tool" == "gemini" ]]; then
-            setup_worktree "$full_path" "$sname"
-            if [[ $? -ne 0 ]]; then return 1; fi
-            session_dir="$REPLY"
+        local existing_source_dir
+        existing_source_dir=$(tmux show-environment -t "=$sname" SOURCE_DIR 2>/dev/null | grep -v '^-' | cut -d= -f2)
+        if [[ -z "$existing_source_dir" ]]; then
+            existing_source_dir=$(tmux show-environment -t "=$sname" PROJECT_DIR 2>/dev/null | grep -v '^-' | cut -d= -f2)
         fi
 
-        tmux new-session -d -s "$sname" -c "$session_dir"
-        tmux send-keys -t "$sname" "clear && /mnt/data/projects/script_stash/tmux-connect/ai-session $tool" Enter
-        tmux set-environment -t "=$sname" PROJECT_DIR "$session_dir"
-        tmux set-environment -t "=$sname" TOOL "$tool"
+        if [[ -n "$existing_source_dir" && "$existing_source_dir" != "$full_path" ]]; then
+            STATUS_MSG="Session '$sname' already points to a different path. Choose another name or attach from Sessions."
+            STATUS_COLOR="$RED"
+            return 1
+        fi
+
         tmux attach -t "=$sname"
         check_exit_after_attach "$sname"
+        return
     fi
+
+    prompt_tool "$full_path"
+    if [[ $? -ne 0 ]]; then return 1; fi
+    local tool="$REPLY"
+    local session_dir="$full_path"
+
+    if [[ "$tool" == "gemini" ]]; then
+        setup_worktree "$full_path" "$sname"
+        if [[ $? -ne 0 ]]; then return 1; fi
+        session_dir="$REPLY"
+    fi
+
+    tmux new-session -d -s "$sname" -c "$session_dir"
+    tmux send-keys -t "$sname" "clear && \"$AI_SESSION_BIN\" $tool" Enter
+    tmux set-environment -t "=$sname" PROJECT_DIR "$session_dir"
+    tmux set-environment -t "=$sname" SOURCE_DIR "$full_path"
+    tmux set-environment -t "=$sname" SESSION_KIND "$item_type"
+    tmux set-environment -t "=$sname" TOOL "$tool"
+    tmux attach -t "=$sname"
+    check_exit_after_attach "$sname"
 }
 
 create_folder() {
     local root_dir="$1"
-    echo ""
-    read_input_with_cancel "  Folder name: "
-    if [[ $? -ne 0 ]]; then return 1; fi
+    local item_type="${2:-project}"
+    local prompt="  Folder name: "
     local folder
-    folder=$(echo "$REPLY" | xargs)
+    local business_name
+    local tool_name
+
+    if [[ "$item_type" == "business" ]]; then
+        prompt_business_name
+        if [[ $? -ne 0 ]]; then return 1; fi
+        business_name=$(echo "$REPLY" | xargs)
+
+        if [ -z "$business_name" ]; then
+            STATUS_MSG="No business selected."
+            STATUS_COLOR="$RED"
+            return 1
+        fi
+
+        if [[ "$business_name" == */* ]]; then
+            STATUS_MSG="Business name cannot contain '/'."
+            STATUS_COLOR="$RED"
+            return 1
+        fi
+
+        echo ""
+        read_input_with_cancel "  Tool name: "
+        if [[ $? -ne 0 ]]; then return 1; fi
+        tool_name=$(echo "$REPLY" | xargs)
+
+        if [ -z "$tool_name" ]; then
+            STATUS_MSG="No tool name provided."
+            STATUS_COLOR="$RED"
+            return 1
+        fi
+
+        if [[ "$tool_name" == */* ]]; then
+            STATUS_MSG="Tool name cannot contain '/'."
+            STATUS_COLOR="$RED"
+            return 1
+        fi
+
+        folder="$business_name/$tool_name"
+    else
+        echo ""
+        read_input_with_cancel "$prompt"
+        if [[ $? -ne 0 ]]; then return 1; fi
+        folder=$(echo "$REPLY" | xargs)
+    fi
 
     if [ -z "$folder" ]; then
         STATUS_MSG="No folder name provided."
@@ -924,8 +1435,26 @@ create_folder() {
         return 1
     fi
 
+    if [[ "$item_type" == "business" ]]; then
+        if [[ "$folder" != */* ]]; then
+            STATUS_MSG="Use business/tool so tools stay grouped."
+            STATUS_COLOR="$RED"
+            return 1
+        fi
+        if [[ "$folder" =~ (^/|/$|//) ]]; then
+            STATUS_MSG="Business/tool path is invalid."
+            STATUS_COLOR="$RED"
+            return 1
+        fi
+    elif [[ "$folder" == */* ]]; then
+        STATUS_MSG="Projects and services must be a single folder name."
+        STATUS_COLOR="$RED"
+        return 1
+    fi
+
     mkdir -p "$root_dir/$folder"
-    launch_session "$folder" "$root_dir"
+    MODE_TOTALS_DIRTY=1
+    launch_session "$folder" "$root_dir/$folder" "$item_type" "$(session_name_default_from_path "$folder")"
 }
 
 attach_to_session() {
@@ -938,14 +1467,11 @@ attach_to_session() {
 
 launch_from_picker() {
     local idx=$1
-    local folder="${AVAILABLE_ITEMS[$idx]}"
-    local root_dir
-    if [[ "$CURRENT_MODE" == "projects" ]]; then
-        root_dir="$PROJECTS_DIR"
-    else
-        root_dir="$SERVICES_DIR"
-    fi
-    launch_session "$folder" "$root_dir"
+    launch_session \
+        "${AVAILABLE_ITEMS[$idx]}" \
+        "${AVAILABLE_ITEM_PATHS[$idx]}" \
+        "${AVAILABLE_ITEM_TYPES[$idx]}" \
+        "${AVAILABLE_ITEM_DEFAULTS[$idx]}"
 }
 
 next_scratchpad_number() {
@@ -969,9 +1495,10 @@ handle_scratchpad() {
     # No scratchpads exist — create the base scratchpad and attach
     if [ "$has_any_scratchpad" -eq 0 ]; then
         prompt_tool "$SCRATCH_DIR"
+        if [[ $? -ne 0 ]]; then return 0; fi
         local tool="$REPLY"
         tmux new-session -d -s scratchpad -c "$SCRATCH_DIR"
-        tmux send-keys -t "scratchpad" "clear && /mnt/data/projects/script_stash/tmux-connect/ai-session $tool" Enter
+        tmux send-keys -t "scratchpad" "clear && \"$AI_SESSION_BIN\" $tool" Enter
         tmux set-environment -t "=scratchpad" TOOL "$tool"
         tmux attach -t "=scratchpad"
         check_exit_after_attach "scratchpad"
@@ -1004,9 +1531,10 @@ handle_scratchpad() {
     fi
 
     prompt_tool "$SCRATCH_DIR"
+    if [[ $? -ne 0 ]]; then return 0; fi
     local tool="$REPLY"
     tmux new-session -d -s "$sp_name" -c "$SCRATCH_DIR"
-    tmux send-keys -t "$sp_name" "clear && /mnt/data/projects/script_stash/tmux-connect/ai-session $tool" Enter
+    tmux send-keys -t "$sp_name" "clear && \"$AI_SESSION_BIN\" $tool" Enter
     tmux set-environment -t "=$sp_name" TOOL "$tool"
     tmux attach -t "=$sp_name"
     check_exit_after_attach "$sp_name"
@@ -1108,35 +1636,21 @@ handle_rename() {
 }
 
 handle_new_folder() {
-    local root_dir
-    if [[ "$CURRENT_MODE" == "projects" ]]; then
-        root_dir="$PROJECTS_DIR"
-    else
-        root_dir="$SERVICES_DIR"
-    fi
-    create_folder "$root_dir"
-}
-
-confirm_command_key() {
-    local cmd_key="$1"
-    printf "%s" "$cmd_key"
-    while true; do
-        IFS= read -rsn1 ch
-        if [[ "$ch" == '' ]]; then
-            return 0
-        fi
-        if [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
-            printf "\b \b"
-            skip_reload=1
-            return 1
-        fi
-        if [[ "$ch" == $'\e' ]]; then
-            handle_escape_in_confirm "$cmd_key"
-            if [[ "$ESCAPE_RESULT" == "cancel" ]]; then
-                return 1
-            fi
-        fi
-    done
+    case "$CURRENT_MODE" in
+        projects)
+            create_folder "$PROJECTS_DIR" "project"
+            ;;
+        services)
+            create_folder "$SERVICES_DIR" "service"
+            ;;
+        businesses)
+            create_folder "$BUSINESSES_DIR" "business"
+            ;;
+        all)
+            STATUS_MSG="Switch to Projects, Services, or Businesses to create a new item."
+            STATUS_COLOR="$RED"
+            ;;
+    esac
 }
 
 dispatch_command_key() {
@@ -1168,8 +1682,12 @@ handle_main_escape() {
                 move_picker_selection 1
                 return 0
                 ;;
-            C|D)
-                toggle_mode
+            C)
+                cycle_mode 1
+                return 0
+                ;;
+            D)
+                cycle_mode -1
                 return 0
                 ;;
             *)
@@ -1276,14 +1794,8 @@ while true; do
             launch_selected_picker_item
             ;;
         [A-Z])
-            if [[ -n "$FILTER_BUFFER" && ! "$key" =~ ^[SNRQ]$ ]]; then
-                append_picker_filter "$key"
-                continue
-            fi
             if [[ "$key" =~ ^[SNRQ]$ ]]; then
-                if confirm_command_key "$key"; then
-                    dispatch_command_key "$key"
-                fi
+                dispatch_command_key "$key"
             else
                 append_picker_filter "$key"
             fi
